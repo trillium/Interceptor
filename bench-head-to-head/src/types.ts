@@ -79,7 +79,6 @@ export interface ModelsConfig {
 export interface RunPolicy {
   defaultRepeats: number
   publishedRepeats: number
-  timeoutSeconds: number
   randomizeOrder: boolean
   freshStatePerRun: boolean
   sameWorkstationRequired: boolean

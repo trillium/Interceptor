@@ -17,12 +17,7 @@ export function startFixtureServer(): void {
   })
   fixtureServer.unref()
 
-  const deadline = Date.now() + 15_000
-  while (Date.now() < deadline) {
-    if (fixtureServerHealthy()) return
-    shellResult("sleep 0.25", { timeoutMs: 2_000 })
-  }
-  throw new Error("Fixture server failed to become healthy on :3241")
+  while (!fixtureServerHealthy()) {}
 }
 
 export function stopFixtureServer(): void {
@@ -39,10 +34,11 @@ export function stopFixtureServer(): void {
 
 export function startCondition(condition: ConditionDef): void {
   if (condition.id === "interceptor") {
-    shellResult("interceptor reload", { timeoutMs: 10_000 })
+    shellResult("interceptor reload")
+    shellResult("sleep 2")
   }
   if (condition.daemon === "explicit" && condition.daemonStart) {
-    shellResult(condition.daemonStart, { timeoutMs: 30_000 })
+    shellResult(condition.daemonStart)
   }
   waitForHealth(condition)
 }
@@ -52,44 +48,31 @@ export function stopCondition(condition: ConditionDef): void {
     resetInterceptorManagedTabs()
   }
   if (condition.daemon === "explicit" && condition.daemonStop) {
-    shellResult(condition.daemonStop, { timeoutMs: 15_000 })
+    shellResult(condition.daemonStop)
   }
 }
 
 export function waitForHealth(condition: ConditionDef): void {
   if (!condition.healthCommand) return
-  const deadline = Date.now() + 15_000
-  while (Date.now() < deadline) {
-    const health = shellResult(condition.healthCommand, { timeoutMs: 5_000 })
-    if (health.ok) return
-    shellResult("sleep 0.25", { timeoutMs: 2_000 })
+  const deadline = Date.now() + 60_000
+  while (!shellResult(condition.healthCommand, { timeoutMs: 30_000 }).ok) {
+    if (Date.now() > deadline) {
+      throw new Error(`Health check timed out for ${condition.id}: ${condition.healthCommand}`)
+    }
   }
-  throw new Error(`Condition ${condition.id} failed health check: ${condition.healthCommand}`)
 }
 
 export function runPreflight(condition: ConditionDef): void {
-  const maxAttempts = condition.id === "interceptor" ? 3 : 1
-  let lastError = ""
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    let failed = false
-    for (const command of condition.preflight?.commands ?? []) {
-      const result = shellResult(command, { timeoutMs: 30_000 })
-      if (!result.ok) {
-        lastError = `Preflight failed for ${condition.id}: ${command}\n${result.stderr || result.stdout}`
-        failed = true
-        break
-      }
-    }
-    if (!failed) return
-    if (attempt < maxAttempts) {
-      shellResult("sleep 1", { timeoutMs: 3_000 })
+  for (const command of condition.preflight?.commands ?? []) {
+    const result = shellResult(command, { timeoutMs: 30_000 })
+    if (!result.ok) {
+      throw new Error(`Preflight failed for ${condition.id}: ${command}\n${result.stderr || result.stdout}`)
     }
   }
-  throw new Error(lastError)
 }
 
 function fixtureServerHealthy(): boolean {
-  const health = shellResult("curl -sf http://127.0.0.1:3241/health", { timeoutMs: 2_000 })
+  const health = shellResult("curl -sf http://127.0.0.1:3241/health")
   if (!health.ok) return false
   try {
     const parsed = JSON.parse(health.stdout) as { ok?: boolean; fixtureRoot?: string; fixtures?: Record<string, boolean> }
@@ -97,7 +80,7 @@ function fixtureServerHealthy(): boolean {
     if (parsed.ok !== true) return false
     for (const page of FIXTURE_PAGES) {
       if (parsed.fixtures?.[page.path] !== true) return false
-      const pageResp = shellResult(`curl -sf http://127.0.0.1:3241${page.path}`, { timeoutMs: 2_000 })
+      const pageResp = shellResult(`curl -sf http://127.0.0.1:3241${page.path}`)
       if (!pageResp.ok) return false
       if (validateFixtureHtml(page, pageResp.stdout)) return false
     }
@@ -108,25 +91,24 @@ function fixtureServerHealthy(): boolean {
 }
 
 function stopProcessOnFixturePort(): void {
-  const pids = shellResult("lsof -ti tcp:3241", { timeoutMs: 2_000 })
+  const pids = shellResult("lsof -ti tcp:3241")
   if (!pids.ok || !pids.stdout.trim()) return
   for (const pid of pids.stdout.trim().split(/\s+/)) {
     if (/^\d+$/.test(pid)) {
-      shellResult(`kill ${pid}`, { timeoutMs: 2_000 })
+      shellResult(`kill ${pid}`)
     }
   }
-  shellResult("sleep 0.5", { timeoutMs: 2_000 })
 }
 
 export function resetInterceptorManagedTabs(): void {
-  const tabs = shellResult("interceptor tabs --json", { timeoutMs: 10_000 })
+  const tabs = shellResult("interceptor tabs --json")
   if (!tabs.ok) return
   try {
     const parsed = JSON.parse(tabs.stdout) as { data?: Array<{ id: number; managed?: boolean }> }
     for (const tab of parsed.data ?? []) {
-      if (tab.managed) shellResult(`interceptor tab close ${tab.id}`, { timeoutMs: 5_000 })
+      if (tab.managed) shellResult(`interceptor tab close ${tab.id}`)
     }
   } catch {
   }
-  shellResult("interceptor net clear", { timeoutMs: 5_000 })
+  shellResult("interceptor net clear")
 }

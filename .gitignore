@@ -23,3 +23,13 @@ keys/
 /MEMORY/
 bench-head-to-head/results/
 bench-head-to-head/results-archive-*/
+
+# Release / notarization artifacts (never commit credentials or built installers)
+notarization.env
+.notarization.env
+*.pkg
+*.dmg
+notary-log-*.json
+release-notes-*.md
+staging/
+/release/

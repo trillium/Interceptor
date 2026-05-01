@@ -11,7 +11,7 @@ export type Action =
   | { type: "extract_text"; index?: number; ref?: string; frameId?: number }
   | { type: "extract_html"; index?: number; ref?: string; frameId?: number }
   | { type: "evaluate"; code: string; world?: "MAIN" | "ISOLATED" }
-  | { type: "screenshot"; format?: "png" | "jpeg"; quality?: number; save?: boolean; clip?: { x: number; y: number; width: number; height: number }; element?: number; full?: boolean }
+  | { type: "screenshot"; format?: "png" | "jpeg" | "webp"; quality?: number; save?: boolean; clip?: { x: number; y: number; width: number; height: number }; element?: number; full?: boolean; target_max_long_edge?: number }
   | { type: "tab_create"; url?: string }
   | { type: "tab_close"; tabId?: number }
   | { type: "tab_switch"; tabId: number }
@@ -22,8 +22,6 @@ export type Action =
   | { type: "network_intercept"; patterns: string[]; enabled: boolean }
   | { type: "network_log"; since?: number; limit?: number }
   | { type: "network_override"; enabled: boolean; rules?: NetworkOverrideRule[] }
-  | { type: "linkedin_event_extract"; url?: string; waitMs?: number }
-  | { type: "linkedin_attendees_extract"; url?: string; waitMs?: number; enrichLimit?: number }
   | { type: "storage_get"; keys?: string[] }
   | { type: "storage_set"; data: Record<string, unknown> }
   | { type: "headers_modify"; rules: HeaderRule[] }

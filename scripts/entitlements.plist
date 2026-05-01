@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Required so interceptor-bridge can send Apple Events to other apps
+         under hardened runtime. macOS still prompts the user on first dispatch
+         per (interceptor-bridge, target_app) pair via TCC. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,9 @@
+source: https://github.com/kunchenguid/axi
+subpath: .agents/skills/axi/SKILL.md
+commit: a7193a0d4143696a969e999bbc1e9463f848005d
+fetched-at: 2026-04-29T07:47:17Z
+
+To refresh:
+  git clone --depth 1 https://github.com/kunchenguid/axi.git /tmp/axi-skill-tmp
+  cp /tmp/axi-skill-tmp/.agents/skills/axi/SKILL.md bench-head-to-head/vendor/axi-skill/axi/SKILL.md
+  (cd /tmp/axi-skill-tmp && git rev-parse HEAD)   # update this file's commit line

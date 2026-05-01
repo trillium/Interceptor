@@ -72,7 +72,7 @@ function getActiveSessionForTab(tabId: number): SessionRecord | undefined {
 }
 
 /**
- * Focus-follow (PRD-34) needs to find the session even when the activated tab
+ * Focus-follow needs to find the session even when the activated tab
  * isn't yet in `activeSessionByTab`. V1 supports one session at a time, so the
  * first non-paused session wins. Returning undefined when no session is active
  * keeps the listener a no-op for non-recording windows.
@@ -489,7 +489,7 @@ function registerTabListenersOnce(): void {
   if (tabsRegistered) return
   tabsRegistered = true
 
-  // PRD-34 — focus-follow within the interceptor group.
+  // Focus-follow within the interceptor group.
   // When the user manually activates another tab in the cyan group, the
   // session detaches from the previous tab and attaches to the new one.
   // Personal tabs (outside the group) are never followed.

@@ -1,0 +1,65 @@
+#!/bin/bash
+# Postinstall — runs as root after the .pkg payload is laid down.
+#
+# Two things only the installing user's UID can determine, so they live here:
+#
+#   1. Symlink the (already-rendered, laid down by the payload) native
+#      messaging host manifest into the installing user's Chrome and Brave
+#      NativeMessagingHosts directories.
+#   2. Bootstrap the LaunchAgent into the user's gui/<uid> domain so the
+#      bridge starts immediately, without requiring a logout/login. The
+#      LaunchAgent plist itself is part of the pkg payload at
+#      /Library/LaunchAgents — macOS auto-loads it at every user login as a
+#      safety net even if bootstrap here fails.
+#
+# Everything that doesn't require runtime values is in the payload, not here.
+
+set -euo pipefail
+
+INSTALL_ROOT="/Library/Application Support/Interceptor"
+RENDERED_MANIFEST="$INSTALL_ROOT/com.interceptor.host.json"
+LAUNCH_AGENT_PATH="/Library/LaunchAgents/com.interceptor.bridge.plist"
+
+# ── Identify the installing user ──────────────────────────────────────────────
+# The installer sets $USER to root; we need the GUI user who initiated the
+# install. macOS exposes that via the console-owning user.
+TARGET_USER="$(stat -f '%Su' /dev/console)"
+if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
+  TARGET_USER="${USER:-}"
+fi
+
+if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
+  # No GUI user (e.g. headless install). Payload is laid down; LaunchAgent
+  # auto-loads on next user login. Per-user symlinks just don't get created
+  # in this run — the user can re-run the installer from their session.
+  exit 0
+fi
+
+TARGET_HOME="$(dscl . -read /Users/"$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || true)"
+
+# ── Symlink manifest into Chrome + Brave per-user NMH dirs ────────────────────
+if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
+  for browser_dir in \
+    "$TARGET_HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts" \
+    "$TARGET_HOME/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+  do
+    mkdir -p "$browser_dir"
+    ln -sfn "$RENDERED_MANIFEST" "$browser_dir/com.interceptor.host.json"
+    chown -R "$TARGET_USER" "$browser_dir" 2>/dev/null || true
+  done
+fi
+
+# ── Bootstrap the LaunchAgent into the installing user's gui session ──────────
+# The plist itself is part of the payload at /Library/LaunchAgents/. macOS
+# auto-loads /Library/LaunchAgents at every user login, so the bridge will
+# come up next login even if bootstrap here fails. This block just makes the
+# bridge start immediately for the user who's installing right now.
+if [[ -n "$TARGET_UID" && -f "$LAUNCH_AGENT_PATH" ]]; then
+  # Bootout first for idempotency across re-installs.
+  launchctl asuser "$TARGET_UID" launchctl bootout "gui/$TARGET_UID/com.interceptor.bridge" 2>/dev/null || true
+  launchctl asuser "$TARGET_UID" launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_AGENT_PATH" 2>/dev/null || true
+  launchctl asuser "$TARGET_UID" launchctl kickstart -k "gui/$TARGET_UID/com.interceptor.bridge" 2>/dev/null || true
+fi
+
+exit 0

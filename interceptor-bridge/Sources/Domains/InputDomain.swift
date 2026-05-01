@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import AppKit
 
 enum InputError: Error {
     case message(String)
@@ -207,6 +208,22 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     private func handleScroll(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         let direction = action["direction"] as? String ?? "down"
         let amount = action["amount"] as? Int32 ?? 300
+        let times = max(1, action["times"] as? Int ?? 1)
+        let intervalMs = max(0, action["intervalMs"] as? Int ?? 50)
+        // --pid <pid> or --app <appName> routes the scroll wheel event
+        // directly to that process via CGEvent.postToPid, bypassing the
+        // focused-window routing of cghidEventTap. This lets us scroll an
+        // occluded window (e.g. Signal in the background) without bringing
+        // it to front. Same trick DockDoor / AltTab use.
+        let targetPid: pid_t?
+        if let p = action["pid"] as? Int {
+            targetPid = pid_t(p)
+        } else if let appName = action["app"] as? String {
+            let workspace = NSWorkspace.shared
+            targetPid = workspace.runningApplications.first(where: { $0.localizedName == appName })?.processIdentifier
+        } else {
+            targetPid = nil
+        }
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             completion(WireFormat.error("failed to create event source"))
@@ -223,10 +240,36 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         default: dy = -amount; dx = 0
         }
 
-        if let scrollEvent = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
-            scrollEvent.post(tap: .cghidEventTap)
+        // when targeting a backgrounded process, wake its event
+        // loop first via the SLPS make-key trick so Chromium / Electron
+        // actually processes the scroll. The window stays where it is in
+        // z-order; the user's focused app is preserved.
+        if let pid = targetPid {
+            // Find a window for this pid via CGWindowList so we have a CGWindowID.
+            if let arr = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] {
+                let mine = arr.first(where: { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid })
+                if let wid = mine?[kCGWindowNumber as String] as? CGWindowID {
+                    _ = cgsWakeWindowEventLoop(pid: pid, windowID: wid)
+                    // Tiny grace so Chromium can flush its input queue once.
+                    usleep(40_000)
+                }
+            }
         }
-        completion(WireFormat.success("scrolled \(direction) \(amount)"))
+
+        for i in 0..<times {
+            if let scrollEvent = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
+                if let pid = targetPid {
+                    scrollEvent.postToPid(pid)
+                } else {
+                    scrollEvent.post(tap: .cghidEventTap)
+                }
+            }
+            if i < times - 1, intervalMs > 0 {
+                usleep(useconds_t(intervalMs * 1000))
+            }
+        }
+        let routing = targetPid.map { "pid=\($0)" } ?? "focused"
+        completion(WireFormat.success("scrolled \(direction) \(amount)x\(times) → \(routing)"))
     }
 
     // MARK: - Drag

@@ -193,12 +193,24 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     case "scroll": {
       const direction = filtered[2] || "down"
       const amount = parseInt(filtered[3] || "300")
-      return {
+      const action: Action = {
         type: "macos_scroll",
         direction,
         amount: isNaN(amount) ? 300 : amount,
         ref: flagVal(filtered, "--ref"),
       }
+      // --pid <pid> or --app <name> routes scroll to a specific process
+      // via CGEvent.postToPid — works on occluded / minimized windows
+      // without changing focus.
+      const pid = flagInt(filtered, "--pid")
+      const targetApp = flagVal(filtered, "--app")
+      const times = flagInt(filtered, "--times")
+      const intervalMs = flagInt(filtered, "--interval-ms")
+      if (pid !== undefined) action.pid = pid
+      if (targetApp) action.app = targetApp
+      if (times !== undefined) action.times = times
+      if (intervalMs !== undefined) action.intervalMs = intervalMs
+      return action
     }
 
     case "resize": {
@@ -230,8 +242,10 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     }
 
     // ── Screenshot / Capture ──
-    case "screenshot":
-      return {
+    case "screenshot": {
+      // Capture-time optimizations: target_max_long_edge resize at capture,
+      // WebP encoding, save-strips-dataUrl, --mode display for full-screen.
+      const action: Action = {
         type: "macos_screenshot",
         app: flagVal(filtered, "--app"),
         display: flagInt(filtered, "--display"),
@@ -242,6 +256,21 @@ export function parseMacosCommand(filtered: string[]): Action | null {
         element: flagVal(filtered, "--element"),
         cwd: process.cwd(),
       }
+      const mode = flagVal(filtered, "--mode")
+      if (mode) action.mode = mode
+      // --full-screen is a friendlier alias for --mode display
+      if (filtered.includes("--full-screen") || filtered.includes("--display-mode")) {
+        action.mode = "display"
+      }
+      const targetMaxLongEdge = flagInt(filtered, "--target-max-long-edge")
+      if (targetMaxLongEdge !== undefined) {
+        action.target_max_long_edge = targetMaxLongEdge
+      } else if (flagVal(filtered, "--target-max-long-edge") === "0") {
+        // Explicit "no resize" — keep full pixel resolution (legacy behavior).
+        action.target_max_long_edge = 0
+      }
+      return action
+    }
 
     case "capture": {
       const op = filtered[2] || "frame"
@@ -467,6 +496,318 @@ export function parseMacosCommand(filtered: string[]): Action | null {
         sub: "inspect",
         app: flagVal(filtered, "--app"),
         pid: flagInt(filtered, "--pid"),
+      }
+    }
+
+    // ── Filesystem (FsDomain) ──
+    case "fs": {
+      const fsSub = filtered[2]
+      if (!fsSub) {
+        console.error("error: interceptor macos fs requires a subcommand: read | write | search")
+        process.exit(1)
+      }
+      switch (fsSub) {
+        case "read": {
+          const path = filtered[3]
+          if (!path) { console.error("error: interceptor macos fs read requires a path"); process.exit(1) }
+          const action: Action = {
+            type: "macos_fs_read",
+            path,
+            encoding: flagVal(filtered, "--encoding") || "utf8",
+          }
+          const range = flagVal(filtered, "--byte-range")
+          if (range) {
+            const [s, l] = range.split(",").map((v) => parseInt(v, 10))
+            if (!isNaN(s) && !isNaN(l)) action.byteRange = { start: s, length: l }
+          }
+          return action
+        }
+        case "write": {
+          const path = filtered[3]
+          if (!path) { console.error("error: interceptor macos fs write requires a path"); process.exit(1) }
+          const action: Action = { type: "macos_fs_write", path }
+          const content = flagVal(filtered, "--content")
+          const base64 = flagVal(filtered, "--base64")
+          if (content !== undefined) action.content = content
+          if (base64 !== undefined) { action.content = base64; action.encoding = "base64" }
+          if (filtered.includes("--append")) action.append = true
+          return action
+        }
+        case "search": {
+          const query = filtered[3]
+          if (!query) { console.error("error: interceptor macos fs search requires a query"); process.exit(1) }
+          return {
+            type: "macos_fs_search",
+            query,
+            scope: flagVal(filtered, "--scope"),
+            limit: flagInt(filtered, "--limit") || 50,
+          }
+        }
+        default:
+          console.error(`error: unknown 'fs' subcommand '${fsSub}'. Use: read | write | search`)
+          process.exit(1)
+      }
+    }
+
+    // ── URL fetch (NetDomain) ──
+    case "url": {
+      const urlSub = filtered[2]
+      if (!urlSub) {
+        console.error("error: interceptor macos url requires a subcommand: get | post")
+        process.exit(1)
+      }
+      const target = filtered[3]
+      if (!target) { console.error(`error: interceptor macos url ${urlSub} requires a URL`); process.exit(1) }
+      const headers: Record<string, string> = {}
+      // Collect every --header "K: V" pair
+      for (let i = 0; i < filtered.length - 1; i++) {
+        if (filtered[i] === "--header" || filtered[i] === "-H") {
+          const raw = filtered[i + 1]
+          const m = /^([^:]+):\s*(.*)$/.exec(raw)
+          if (m) headers[m[1].trim()] = m[2]
+        }
+      }
+      const action: Action = {
+        type: "macos_url_fetch",
+        url: target,
+        method: urlSub === "post" ? "POST" : (flagVal(filtered, "--method") || "GET").toUpperCase(),
+        headers,
+        timeoutMs: flagInt(filtered, "--timeout") || 30000,
+      }
+      const body = flagVal(filtered, "--body")
+      if (body !== undefined) action.body = body
+      const ct = flagVal(filtered, "--content-type")
+      if (ct) (action.headers as Record<string, string>)["Content-Type"] = ct
+      return action
+    }
+
+    // ── Log query (LogDomain) ──
+    case "log": {
+      const logSub = filtered[2]
+      if (logSub !== "query") {
+        console.error("error: interceptor macos log requires the 'query' subcommand")
+        process.exit(1)
+      }
+      let predicate = flagVal(filtered, "--predicate")
+      const subsystem = flagVal(filtered, "--subsystem")
+      const category = flagVal(filtered, "--category")
+      // Build a predicate from --subsystem / --category if no explicit one
+      if (!predicate) {
+        const parts: string[] = []
+        if (subsystem) parts.push(`subsystem == "${subsystem}"`)
+        if (category) parts.push(`category == "${category}"`)
+        if (parts.length) predicate = parts.join(" AND ")
+      }
+      return {
+        type: "macos_log_query",
+        predicate,
+        since: flagVal(filtered, "--since"),
+        limit: flagInt(filtered, "--limit") || 100,
+        includeInfo: filtered.includes("--include-info"),
+        includeDebug: filtered.includes("--include-debug"),
+      }
+    }
+
+    // ── app_intent (Apple Events / IntentDomain) ──
+    case "intent": {
+      const intentSub = filtered[2]
+      if (!intentSub) {
+        console.error("error: interceptor macos intent requires a subcommand: dispatch | warmup")
+        process.exit(1)
+      }
+      switch (intentSub) {
+        case "dispatch": {
+          const action: Action = { type: "macos_intent_dispatch" }
+          const script = flagVal(filtered, "--script")
+          const javascript = flagVal(filtered, "--javascript")
+          const bundleId = flagVal(filtered, "--bundle")
+          const intent = flagVal(filtered, "--intent")
+          const target = flagVal(filtered, "--target")
+          const params = flagVal(filtered, "--params")
+          const argsRaw = flagVal(filtered, "--args")
+
+          if (script !== undefined) action.script = script
+          if (javascript !== undefined) action.javascript = javascript
+          if (bundleId !== undefined) action.bundleId = bundleId
+          if (intent !== undefined) action.intent = intent
+          if (target !== undefined) action.target = target
+          if (params !== undefined) {
+            try { action.parameters = JSON.parse(params) }
+            catch { console.error("error: --params must be JSON"); process.exit(1) }
+          }
+          if (argsRaw !== undefined) {
+            try { action.args = JSON.parse(argsRaw) }
+            catch {
+              // Allow space-separated raw form
+              action.args = argsRaw.split(" ").filter(Boolean)
+            }
+          }
+          if (!script && !javascript && !bundleId) {
+            console.error("error: macos intent dispatch requires one of --script, --javascript, or --bundle")
+            process.exit(1)
+          }
+          return action
+        }
+        case "warmup": {
+          const bundleIds = filtered.slice(3).filter((s) => !s.startsWith("--"))
+          if (bundleIds.length === 0) {
+            console.error("error: interceptor macos intent warmup requires one or more bundle ids")
+            process.exit(1)
+          }
+          return { type: "macos_intent_warmup", bundleIds }
+        }
+        default:
+          console.error(`error: unknown 'intent' subcommand '${intentSub}'. Use: dispatch | warmup`)
+          process.exit(1)
+      }
+    }
+
+    // ── container_run (ContainerDomain) ──
+    case "container": {
+      const containerSub = filtered[2]
+      if (containerSub !== "run") {
+        console.error("error: interceptor macos container requires the 'run' subcommand")
+        process.exit(1)
+      }
+      const image = filtered[3]
+      if (!image) {
+        console.error("error: interceptor macos container run requires an image (e.g. docker.io/library/alpine:3)")
+        process.exit(1)
+      }
+      const cmd = flagVal(filtered, "--cmd")
+      const command: string[] = cmd ? cmd.split(" ").filter(Boolean) : []
+      const env: Record<string, string> = {}
+      const mounts: Array<Record<string, unknown>> = []
+      for (let i = 0; i < filtered.length - 1; i++) {
+        if (filtered[i] === "--env") {
+          const raw = filtered[i + 1]
+          const m = /^([^=]+)=(.*)$/.exec(raw)
+          if (m) env[m[1]] = m[2]
+        }
+        if (filtered[i] === "--volume" || filtered[i] === "-v") {
+          const raw = filtered[i + 1]
+          // host:container[:mode]
+          const parts = raw.split(":")
+          if (parts.length >= 2) {
+            mounts.push({
+              hostPath: parts[0],
+              mountPath: parts[1],
+              mode: parts[2] || "ro",
+            })
+          }
+        }
+      }
+      return {
+        type: "macos_container_run",
+        image,
+        command,
+        network: flagVal(filtered, "--network") || "off",
+        env,
+        mounts,
+        timeoutMs: flagInt(filtered, "--timeout") || 60000,
+      }
+    }
+
+    // ── Overlays (OverlayDomain) ──
+    case "overlay": {
+      const overlaySub = filtered[2]
+      if (!overlaySub) {
+        console.error("error: interceptor macos overlay requires a subcommand: start | stop | list | status | eval | ctl | verbs")
+        process.exit(1)
+      }
+      switch (overlaySub) {
+        case "start": {
+          const action: Action = { type: "macos_overlay_start" }
+          const id = flagVal(filtered, "--id")
+          const level = flagVal(filtered, "--level")
+          const particles = flagVal(filtered, "--particles")
+          const scene = flagVal(filtered, "--scene")
+          const sceneScript = flagVal(filtered, "--scene-script")
+          const url = flagVal(filtered, "--url")
+          const htmlB64 = flagVal(filtered, "--html-b64")
+          const rect = flagVal(filtered, "--rect")
+          const timeout = flagInt(filtered, "--timeout-seconds")
+          const density = flagInt(filtered, "--density")
+          const lifetime = flagInt(filtered, "--lifetime")
+          const anchor = flagVal(filtered, "--anchor")
+
+          if (id) action.id = id
+          if (level) action.level = level
+          if (filtered.includes("--interactive")) action.interactive = true
+          if (filtered.includes("--no-interactive")) action.interactive = false
+          if (filtered.includes("--single-space")) action.single_space = true
+          if (filtered.includes("--no-fullscreen-aux")) action.no_fullscreen_aux = true
+          if (timeout !== undefined) action.timeout_seconds = timeout
+          if (anchor) action.anchor = anchor
+
+          if (particles) action.particles = particles
+          if (density !== undefined) action.density = density
+          if (lifetime !== undefined) action.lifetime = lifetime
+          if (scene) action.scene = scene
+          if (sceneScript) action.scene_script = sceneScript
+          if (url) action.url = url
+          if (htmlB64) action.html_b64 = htmlB64
+
+          if (rect) {
+            const [x, y, w, h] = rect.split(",").map((v) => parseFloat(v))
+            if (!isNaN(x) && !isNaN(y) && !isNaN(w) && !isNaN(h)) {
+              action.rect = { x, y, width: w, height: h }
+            }
+          }
+
+          if (!particles && !scene && !sceneScript && !url && !htmlB64) {
+            console.error("error: overlay start requires one of --particles, --scene, --scene-script, --url, --html-b64")
+            process.exit(1)
+          }
+          return action
+        }
+        case "stop": {
+          const id = filtered[3]
+          const action: Action = { type: "macos_overlay_stop" }
+          if (id) action.id = id
+          return action
+        }
+        case "list":
+          return { type: "macos_overlay_list" }
+        case "status": {
+          const id = filtered[3]
+          const action: Action = { type: "macos_overlay_status" }
+          if (id) action.id = id
+          return action
+        }
+        case "eval": {
+          const id = filtered[3]
+          const js = filtered[4]
+          if (!id || !js) { console.error("error: overlay eval requires <id> <javascript>"); process.exit(1) }
+          return { type: "macos_overlay_eval", id, javascript: js }
+        }
+        case "ctl": {
+          const id = filtered[3]
+          const verb = filtered[4]
+          if (!id || !verb) { console.error("error: overlay ctl requires <id> <verb> [args]"); process.exit(1) }
+          const action: Action = { type: "macos_overlay_ctl", id, verb }
+          // Remaining --foo bar pairs become args
+          const args: Record<string, unknown> = {}
+          for (let i = 5; i < filtered.length - 1; i++) {
+            if (filtered[i].startsWith("--")) {
+              const key = filtered[i].slice(2)
+              const val = filtered[i + 1]
+              const numeric = parseFloat(val)
+              args[key] = !isNaN(numeric) && /^-?[\d.]+$/.test(val) ? numeric : val
+            }
+          }
+          if (Object.keys(args).length) action.args = args
+          return action
+        }
+        case "verbs": {
+          const id = filtered[3]
+          const action: Action = { type: "macos_overlay_verbs" }
+          if (id) action.id = id
+          return action
+        }
+        default:
+          console.error(`error: unknown 'overlay' subcommand '${overlaySub}'. Use: start | stop | list | status | eval | ctl | verbs`)
+          process.exit(1)
       }
     }
 

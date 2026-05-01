@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Interceptor</title>
+    <organization>com.interceptor</organization>
+    <domains enable_localSystem="true" enable_currentUserHome="true"/>
+
+    <!--
+        customize="never"  → no UI for choosing components; install all four
+        require-scripts="true" → installer waits for postinstall before declaring success
+        rootVolumeOnly="true"  → install on the boot volume only (standard for system tools)
+    -->
+    <options
+        customize="never"
+        require-scripts="true"
+        rootVolumeOnly="true"
+        hostArchitectures="arm64,x86_64"/>
+
+    <!--
+        Minimum macOS 14 (Sonoma) — the Swift bridge is built against
+        the macOS 14 SDK (interceptor-bridge/Package.swift platforms[.macOS(.v14)]).
+    -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <!--
+        Layout shown to the user during install: one bundle per component.
+        productbuild dereferences these against the package-path at build time.
+    -->
+    <!--
+        Post-install screen, picked up by productbuild from the resources dir.
+        Instructs the user to manually load the browser extension (Chrome and
+        Brave do not allow installers to do this) and to grant Privacy and
+        Security prompts on first macOS command.
+    -->
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.interceptor.bridge.choice"/>
+            <line choice="com.interceptor.cli.choice"/>
+            <line choice="com.interceptor.daemon.choice"/>
+            <line choice="com.interceptor.extension.choice"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default" title="Interceptor"/>
+
+    <choice id="com.interceptor.bridge.choice"
+            visible="false"
+            title="Interceptor Bridge"
+            description="macOS native bridge (Accessibility / Screen Capture / Apple Events)">
+        <pkg-ref id="com.interceptor.bridge.pkg"/>
+    </choice>
+
+    <choice id="com.interceptor.cli.choice"
+            visible="false"
+            title="Interceptor CLI"
+            description="The interceptor command-line tool (installed to /usr/local/bin)">
+        <pkg-ref id="com.interceptor.cli.pkg"/>
+    </choice>
+
+    <choice id="com.interceptor.daemon.choice"
+            visible="false"
+            title="Interceptor Daemon"
+            description="Native messaging host daemon">
+        <pkg-ref id="com.interceptor.daemon.pkg"/>
+    </choice>
+
+    <choice id="com.interceptor.extension.choice"
+            visible="false"
+            title="Interceptor Browser Extension"
+            description="Unpacked extension files for Chrome and Brave">
+        <pkg-ref id="com.interceptor.extension.pkg"/>
+    </choice>
+
+    <pkg-ref id="com.interceptor.bridge.pkg">Interceptor-Bridge.pkg</pkg-ref>
+    <pkg-ref id="com.interceptor.cli.pkg">Interceptor-CLI.pkg</pkg-ref>
+    <pkg-ref id="com.interceptor.daemon.pkg">Interceptor-Daemon.pkg</pkg-ref>
+    <pkg-ref id="com.interceptor.extension.pkg">Interceptor-Extension.pkg</pkg-ref>
+</installer-gui-script>

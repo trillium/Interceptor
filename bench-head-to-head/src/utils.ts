@@ -58,7 +58,7 @@ export function getTask(config: BenchConfig, suite: keyof BenchConfig["suites"],
 export function shell(command: string, opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {}): string {
   return execSync(command, {
     cwd: opts.cwd,
-    timeout: opts.timeoutMs ?? 30_000,
+    timeout: opts.timeoutMs,
     encoding: "utf-8",
     stdio: "pipe",
     env: {

@@ -19,7 +19,7 @@
       "preflight": {
         "commands": [
           "interceptor status",
-          "interceptor open https://example.com --text-only"
+          "interceptor open http://127.0.0.1:3241/spa-lab/ --text-only"
         ]
       }
     },
@@ -44,7 +44,7 @@
       "preflight": {
         "commands": [
           "chrome-devtools-axi pages",
-          "chrome-devtools-axi open https://example.com",
+          "chrome-devtools-axi open http://127.0.0.1:3241/spa-lab/",
           "chrome-devtools-axi pages"
         ]
       }

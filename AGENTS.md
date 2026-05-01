@@ -16,6 +16,66 @@ For user-facing overview material, see [README.md](README.md). For implementatio
 - Treat `eN` and framed refs such as `e2_7` as short-lived. Re-run `read` or `find` after navigation, rerenders, or DOM mutations.
 - Do not use `--any-tab` unless the user explicitly wants to operate outside Interceptor's tracked tab group.
 - Prefer passive observation before invasive instrumentation. For network work, start with `inspect` or `net`, not CDP debugger attachment.
+- For browser tasks, default to synthetic events (`act`, `click`, `type`, `keys`). The pre-load `userActivation` override + `__interceptor_trust` event marker handle most `isTrusted` and transient-activation gates. Reach for `--os` only when synthetic input is observed to fail; reach for `interceptor macos` only when the target is outside the page (native app, OS dialog, browser chrome).
+- **Background first.** When the user names a specific app ("screenshot of Brave", "scroll Signal", "open a tab in Brave"), do the work without bringing that app to the foreground unless the task strictly requires focus. Never call `mac_app activate`, `osascript "tell application X to activate"`, or `mac_intent` payloads with `activate`/`reopen` verbs as a reflex. The bridge captures occluded windows via `CGSHWCaptureWindowList`; sets the AX tree via `AXManualAccessibility` wake-up; routes scroll wheels via `CGEvent.postToPid`; and drives Apple Events to apps without raising them. Respect the user's current focused window. Only escalate to a brief raise — or honor an explicit "bring it to front" — when the user asks, or when the operation provably cannot complete in the background (e.g. Chromium-occluded input event delivery).
+
+## Background First
+
+When the target is a specific app, prefer staying invisible to the user. The user's focused window must not change unless they ask for it.
+
+| Operation | Background path (preferred) | When you must escalate |
+|---|---|---|
+| Screenshot of an app's window | `mac_screenshot --app "X"` (CGS path captures occluded / minimized / cross-Space) | `--mode display` only when the user wants the whole screen |
+| List / read a Chrome / Brave tab | Apple Events: `mac_intent dispatch --bundle <id> --script 'tell ... get URL of active tab'` | Only if AppleScript is disabled in the target app |
+| Open a URL in a specific browser | Apple Events: `mac_intent dispatch --bundle com.brave.Browser --script 'open location "https://…"'` (no `activate`) | Only if the user explicitly asks for the browser to come forward |
+| Read a backgrounded Electron app's UI | `mac_tree --app "X"` (auto-fires `AXManualAccessibility` wake-up) | App that gates AX on visibility (Signal): brief-raise + restore focus |
+| Scroll a backgrounded app | `mac_scroll <dir> <amount> --app "X"` (routes via `postToPid`) | Chromium-occluded apps that pause their event loop: brief-raise |
+| Drive a native Cocoa app | AX `mac_act/click/type` against the target's PID without `activate` | OS-level `--os` modifier only if synthetic input fails |
+| Read text / selection from another app | `mac_text` against the target — no focus change | (no escalation needed) |
+
+**Reflexes to drop:**
+- Do NOT call `mac_app activate` before screenshotting or reading. SCK + CGS work on offscreen windows.
+- Do NOT add `activate` to AppleScript blocks unless the user asked the app to come forward.
+- Do NOT bring a window forward "to be safe" — the bridge's CGS / AX paths are designed to work without it.
+- Do NOT use `--mode display` for app-specific captures — it captures the visible composite (which has the wrong app on top).
+
+**When the user explicitly says "bring it forward" / "show me X" / "switch to X":** respect that. Use `mac_app activate "X"` once, do the operation, and unless the user asked you to leave it there, restore the previous frontmost via `_SLPSSetFrontProcessWithOptions` (TODO: surface as `mac_app activate-and-restore`).
+
+## Browser Extension vs macOS Bridge
+
+Both surfaces overlap on some tasks. Pick by the strength matrix below; lean into whatever the user asked for specifically.
+
+| Task | Browser extension | macOS bridge | Why |
+|---|---|---|---|
+| Click a link / fill a form on a page | ✅ default | ❌ | The extension is *inside* the page — cheap synthetic events, semantic selectors, no focus change |
+| Read DOM / SPA network traffic | ✅ default | ❌ | `interceptor inspect`, `net log`, `scene` — built for this |
+| Tab management visible to the page (cookies, storage, history) | ✅ default | ❌ | `chrome.tabs.*` extension surface |
+| Open a URL in a *specific* browser the user named | ⚠️ only if that browser already has the extension | ✅ Apple Events | Extension can't switch browsers; bridge can address Brave/Chrome by bundle id without focus change |
+| Screenshot a *specific* app window (browser or other) | ⚠️ if browser tab | ✅ `mac_screenshot --app` | Bridge captures any window via CGS even when minimized, cross-Space, or occluded |
+| Native dialogs (Save / Open / file picker / system sheets) | ❌ extension cannot see | ✅ AX tree | These live outside the page DOM |
+| Browser chrome (URL bar, bookmark menu, profile picker) | ❌ | ✅ AX tree | Outside DOM |
+| Cross-app routing (copy from PDF in Preview → Slack) | ❌ | ✅ | Bridge addresses each app individually |
+| Drive a non-browser app (Notes, Mail, Music, Cursor) | ❌ | ✅ default | Native AX + Apple Events |
+| Drive an *occluded* Electron app (Signal, Slack while hidden) | ❌ | ✅ for capture, ⚠️ for input (Chromium event-loop pause) | CGS captures invisibly; Chromium-paused input requires brief-raise |
+| Visual overlays / HUDs over content | ⚠️ DOM-only, in-page | ✅ `mac_overlay` (transparent NSPanel above compositor) | Only the bridge can render above all apps |
+| OS-level keyboard / mouse delivery to specific PID | ❌ | ✅ `--os` / `postToPid` | OS-level CGEvent |
+
+**Defaults when in doubt:**
+- Page content → extension (`open`, `read`, `act`, `inspect`, `scene`, `net`, `eval --main`)
+- Anything outside the page → bridge (`interceptor macos *`)
+- App-level operation on a backgrounded app → bridge in background (do not activate)
+- The user's words always win — if they say "open this in Brave" they mean *that* browser; if they say "leave my window alone" they mean don't activate
+
+## Input Layer Priority
+
+| Layer | Use For | Avoid For |
+|---|---|---|
+| **Synthetic** (`act`, `click`, `type`, `keys`, dispatched events via `eval --main` with `event.__interceptor_trust = true`) | DEFAULT for all browser content. Rich-editor typing, canvas pan/zoom/click, design-tool layer-row select + bulk export trigger, form fills, button clicks, keyboard shortcuts to focused inputs. | Native macOS apps; OS-mediated dialogs that escape the page. |
+| **`--os`** (CGEvent on macOS) | ESCALATION ONLY when synthetic is proven not enough — sites with anti-automation that checks beyond `event.isTrusted` (some banking/payment gateways), IME composition input, sites that ignore prototype `isTrusted` overrides because they cache the per-instance own property at boot. | Default browser interaction — the pre-load `userActivation` override (`extension/src/inject-net.ts`) already satisfies the activation gate that historically forced `--os`. |
+| **`interceptor macos`** | Native macOS apps (Finder, Mail, terminal). Browser chrome (URL bar, app menu, system Save/Open dialogs). System notifications. Cross-app workflows. | Content inside a browser page — go through the synthetic layer instead. |
+| **`eval --main`** (with the `__interceptor_trust` marker on dispatched events) | Canvas-rendered surfaces (Docs/Slides/Sheets cell-precise input, WebGL viewer pan/zoom, design-tool layer click + button trigger), client-side blob export capture, monkey-patching for protocol sniffing (WebSocket, sendBeacon, BroadcastChannel). | Tasks that a built-in compound command already covers — prefer named commands first. |
+
+The historical reflex of "site checks `isTrusted` → use `--os`" is no longer correct on most sites. `userActivation.isActive` reads `true` because the pre-load override forces it; dispatched events tagged with `__interceptor_trust` satisfy the per-event check on sites that read `isTrusted` via the prototype. Try synthetic first.
 
 ## Command Selection
 
@@ -31,6 +91,12 @@ For user-facing overview material, see [README.md](README.md). For implementatio
 | Work with rich editors | `scene profile` | Use `scene list`, `scene click`, `scene text`, or slide commands |
 | Control native apps | `interceptor macos open/read/act/inspect` | Use lower-level `macos click/type/keys` |
 | Observe a human workflow | `monitor start --instruction "..."` | Export with `monitor export <sid> --plan` |
+
+---
+
+# Surface 1: Interceptor Browser
+
+The sections below cover the Browser surface (`interceptor` with no prefix). For native macOS, jump to [Surface 2: Interceptor macOS](#surface-2-interceptor-macos). The skill package for this surface lives at `.agents/skills/interceptor-browser/`.
 
 ## Browser Workflow
 
@@ -69,7 +135,7 @@ Use `act` as the default interaction command. It resolves refs, performs the act
 interceptor act e7
 interceptor act e9 "hello@example.com"
 interceptor act e11 --keys "Enter"
-interceptor act e15 --os
+interceptor act e15 --os                 # FALLBACK ONLY — try without --os first; the pre-load userActivation override usually makes it unnecessary
 interceptor act e20 --no-read
 ```
 
@@ -211,6 +277,37 @@ interceptor scene render
 interceptor scene zoom 100
 ```
 
+### Canvas-Rendered Editor Input (Google Docs / Slides / Sheets)
+
+When `scene insert` is not enough — e.g. cell-precise writes into a Docs table, paragraph style changes, keyboard shortcuts to surfaces with no scene equivalent — use the pre-load trust override path. Inject script `inject-net.js` (loaded at `document_start` in MAIN world) installs a `navigator.userActivation.{isActive,hasBeenActive}` override that always reports `true`, satisfying transient-activation gates so dispatched `MouseEvent` and `KeyboardEvent` propagate as if from real user input.
+
+Pattern (run via `interceptor eval --main`):
+
+1. **Caret positioning:** dispatch `mousedown`/`mouseup`/`click` on `.kix-canvas-tile-content` with `event.__interceptor_trust = true` and target pixel — this moves the canvas-side caret. Verify by reading `iwin.getSelection().anchorNode` parent chain for the `<TD>`.
+2. **Text entry:** construct `KeyboardEvent` from the iframe's OWN window (`new iwin.KeyboardEvent(...)`), dispatch on the iframe document (`idoc.dispatchEvent(ev)`).
+3. **Printable keys** (letters, digits, symbols, Space, Enter): full `keydown` → `keypress` → `keyup`.
+4. **Navigation/control keys** (Tab, Arrow*, Home, End, Escape, Backspace, Delete, modifiers): `keydown` → `keyup` ONLY — never `keypress`. Dispatching `keypress` on a navigation key inserts its ASCII character (Tab=`\t`, ArrowUp=`&`, ArrowLeft=`%`, ArrowRight=`'`).
+
+Trap: in Docs tables, **Tab past the last cell of the last row creates a new row.** Fill row N with N writes and N-1 Tabs; exit the table with `ArrowDown`.
+
+For full reference + companion patterns (paragraph style change via `Cmd+Option+1`, recovery from stray character inserts), see [`use-cases/interaction-skills/canvas-rendered-editor-input.md`](use-cases/interaction-skills/canvas-rendered-editor-input.md) and [`use-cases/domain-skills/google-docs/fill-empty-table-cells.md`](use-cases/domain-skills/google-docs/fill-empty-table-cells.md).
+
+### Canvas Camera Apps (WebGL viewers)
+
+The same `userActivation` override + `__interceptor_trust` pattern drives WebGL camera apps. Pan via dispatched `MouseEvent` (mousedown → mousemove sweep → mouseup) on the canvas; zoom via `WheelEvent { deltaY: ±120 }` or `Minus`/`Equal` keystrokes. Anchor DOM overlays to lat/lng with a Web Mercator projection helper (`pixels per deg lng = 256 * 2^zoom / 360`) and refresh them on every URL change. Restyle the rendered viewport via CSS `filter` on the canvas element.
+
+For the full mechanic (projection helper, URL-watcher, disposable handler pattern, antimeridian wrap), see [`use-cases/interaction-skills/canvas-camera-overlays.md`](use-cases/interaction-skills/canvas-camera-overlays.md) and [`use-cases/interaction-skills/webgl-camera-control.md`](use-cases/interaction-skills/webgl-camera-control.md).
+
+### Native Export Capture (any client-side-rendering app)
+
+Modern editor webapps render exports client-side (WebGL/Canvas2D → `Blob` → `URL.createObjectURL` → `<a download>.click()`). To capture the resulting bytes without ever showing the user a Save dialog or hitting the OS clipboard:
+
+1. **Patch `URL.createObjectURL`** in MAIN world to record every blob the app stages — gives you the URL the moment it's created.
+2. **Patch `HTMLAnchorElement.prototype.click`** to swallow programmatic auto-downloads (only suppresses anchors with a `download` attribute or `blob:` href; real user clicks elsewhere still work).
+3. **`fetch(blobUrl).then(r => r.arrayBuffer())`** to read the bytes before the app revokes the URL.
+
+This works on any app whose export pipeline goes through a blob. For a worked end-to-end recipe (frame enumeration, per-frame export trigger, blob extraction loop), see [`use-cases/interaction-skills/blob-export-capture.md`](use-cases/interaction-skills/blob-export-capture.md).
+
 ## Navigation And Tabs
 
 Use navigation commands when preserving tab/session state matters.
@@ -237,31 +334,71 @@ interceptor window new
 
 Use `--tab <id>` when targeting a specific known tab. Use `--any-tab` only when the user explicitly authorizes acting outside managed tabs.
 
+---
+
+# Surface 2: Interceptor macOS
+
+The sections below cover the macOS surface (`interceptor macos *`). For Browser, see [Surface 1: Interceptor Browser](#surface-1-interceptor-browser) above. The skill package for this surface lives at `.agents/skills/interceptor-macos/`.
+
+`.agents/skills/interceptor-windows/` is reserved for a future Windows surface (UIA, Win32 input, ETW). Do not stub it; do not add `interceptor windows` commands to the CLI. The reservation is documentation-only until Windows actually ships.
+
 ## Native macOS Workflow
 
-Use macOS commands when the task requires a native application or OS-level interaction.
+Use macOS commands when the target is a native macOS application (Finder, Mail, terminal), an OS-level dialog (Save/Open file picker, system sheet), browser chrome (URL bar, app menu, system notifications), or a cross-app workflow. **Do not default to `interceptor macos` for content inside a regular browser page** — go through the synthetic-event layer (`act`, `click`, `type`, or `eval --main` with the `__interceptor_trust` marker) first; see Input Layer Priority above.
+
+**Stay in the background unless the user asks otherwise.** The bridge's capture / AX / Apple-Events / scroll paths all work without bringing the target app forward. See [Background First](#background-first) above for the full table.
 
 ```bash
-interceptor macos open "Safari"
-interceptor macos read
-interceptor macos act <ref>
-interceptor macos act <ref> "typed text"
-interceptor macos inspect
+# Background-friendly compound commands (no `activate`, no focus change)
+interceptor macos read --app "Mail"                  # AX tree of Mail while another app stays focused
+interceptor macos screenshot --app "Brave Browser"   # CGS captures Brave's window even if occluded
+interceptor macos act <ref>                          # AX action against a backgrounded app via its ref
+
+# Focus-changing — only when the user asks for it
+interceptor macos open "Safari"                      # NOTE: `open` activates the app; use sparingly
+interceptor macos app activate "Brave Browser"       # Foreground change — only when the user asks
 ```
 
 Use lower-level commands only when compound native commands are not enough.
 
 ```bash
-interceptor macos apps
-interceptor macos app activate "Brave Browser"
-interceptor macos tree
-interceptor macos find "Save"
-interceptor macos click <ref>
-interceptor macos type "text"
-interceptor macos keys "Meta+S"
-interceptor macos app move "Brave Browser" 0 0
+interceptor macos apps                          # List running apps + bundle ids (no focus change)
+interceptor macos windows --app "Brave Browser" # SCShareableContent + AX windows for Brave
+interceptor macos tree --app "X"                # AX tree (auto-wakes Electron AX) — no focus change
+interceptor macos find "Save" --app "X"         # Search Brave's AX tree without raising it
+interceptor macos click <ref>                   # AX press — does not require app to be frontmost
+interceptor macos type "text"                   # Goes to currently focused field (in any app)
+interceptor macos keys "Meta+S"                 # Goes to focused window — be careful which window has focus
+interceptor macos scroll up 400 --app "Brave Browser" --times 5    # postToPid scroll, no focus change
+interceptor macos intent dispatch --bundle com.brave.Browser \
+  --script 'tell application id "com.brave.Browser" to make new tab at end of tabs of front window'
+                                                # Apple Events — opens a tab in Brave WITHOUT activating it
+interceptor macos app move "Brave Browser" 0 0  # Move/resize via AX — does not need to be frontmost
 interceptor macos app resize "Brave Browser" 1440 900
 ```
+
+**Background examples (do these, not the activate-then-act pattern):**
+
+```bash
+# "Take a screenshot of Brave"
+interceptor macos screenshot --app "Brave Browser" --save --target-max-long-edge 1568
+
+# "What URL is open in Brave?"
+interceptor macos intent dispatch --bundle com.brave.Browser \
+  --script 'tell application "Brave Browser" to URL of active tab of front window'
+
+# "Open a new tab in Brave to https://example.com"
+interceptor macos intent dispatch --bundle com.brave.Browser \
+  --script 'tell application "Brave Browser" to tell front window to make new tab with properties {URL:"https://example.com"}'
+
+# "Scroll Mail down 5 times"
+interceptor macos scroll down 400 --app "Mail" --times 5 --interval-ms 80
+
+# "Read the AX tree of Cursor"  (Electron — wake-up handled automatically)
+interceptor macos tree --app "Cursor" --filter interactive --depth 6
+```
+
+None of those touch the user's focused window.
 
 For installation validation, check both:
 
@@ -272,9 +409,15 @@ interceptor macos trust
 
 `macos trust` reports permission state. `status` confirms daemon, bridge, helper, and native-host health.
 
+---
+
+# Shared Across Surfaces
+
+The sections below apply to both surfaces (or contain commands available on both). The macOS monitor commands mirror the browser monitor commands with the `macos` prefix; eval/screenshots/data/storage commands without a `macos` prefix operate on the Browser surface; `batch` / `raw` accept either surface's actions; recovery rules cover both.
+
 ## Monitor Workflow
 
-Use monitor commands when learning or replaying a human workflow matters more than immediate one-off interaction.
+Use monitor commands when learning or replaying a human workflow matters more than immediate one-off interaction. The Browser surface uses `interceptor monitor *`; the macOS surface uses `interceptor macos monitor *`. Same sparse-JSON shape and same `--plan` export, different event source (DOM events vs AX events).
 
 ```bash
 interceptor monitor start --instruction "Watch how the user completes checkout"
@@ -291,21 +434,6 @@ interceptor monitor export <sid> --plan
 interceptor monitor export <sid> --with-bodies
 ```
 
-## ChatGPT Bridge
-
-Use ChatGPT bridge commands only when the task explicitly involves controlling ChatGPT through the browser session.
-
-```bash
-interceptor chatgpt status
-interceptor chatgpt send "Prompt text"
-interceptor chatgpt send "Prompt text" --stream
-interceptor chatgpt read
-interceptor chatgpt conversations
-interceptor chatgpt switch <conversation-id>
-interceptor chatgpt model
-interceptor chatgpt stop
-```
-
 ## Evaluation And Escape Hatches
 
 Use built-in command surfaces first. Use `eval --main` only when there is no appropriate Interceptor command.
@@ -316,9 +444,79 @@ interceptor eval --main "document.title"
 
 On strict-CSP sites, page-world evaluation may require Interceptor's automatic reload/retry fallback before code succeeds. Prefer purpose-built commands over page-world evaluation to reduce this risk.
 
-Use screenshots only when the task depends on rendered pixels, visual layout, chart appearance, image content, or screenshot output.
+Screenshots are a **last-resort** read surface. Use `read`, `text`, `inspect`, `scene text`, `canvas log`, or `macos tree` first — they cost ~10× fewer tokens per turn and survive DOM churn better than pixels. Only reach for a screenshot when pixels are the answer: explicit visual evidence is requested, a layout / color / chart issue cannot be confirmed structurally, or a specific render artifact must be captured. In editors, prefer `scene render` or `canvas read` before a page screenshot.
 
-The default `interceptor screenshot` is a DOM render and does NOT require the browser to be focused or visible — it works from a backgrounded Chrome on a different macOS Space. Use `--selector <css>` for a single element, `--region X,Y,W,H` for an arbitrary rect, `--element <ref>` for a refRegistry-tracked element. Use `--pixel` only when you need pixel-accurate compositor output (e.g., visual regression of compositor effects, hardware video frames); the `--pixel` path requires the browser window to be visible and focused. `--pixel --full` scrolls + stitches and is throttled to clear Chrome's `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota.
+When you must take a screenshot, use the **agent-default recipe** unless the task specifically needs higher fidelity:
+
+```bash
+interceptor screenshot --save --format webp --target-max-long-edge 1568 --quality 85
+```
+
+This produces a small WebP on disk (~50–100 KB for a typical full page) and a path-only response in your tool output. The recipe respects every major vendor's auto-resize ceiling (Sonnet 1568 px, Opus 2576 px, OpenAI normalize-to-2048-then-768) so you pay zero tokens for pixels the model would discard anyway.
+
+Flag reference:
+
+- `--target-max-long-edge <px>` — clamp the rasterized canvas long edge to N pixels. Defaults to no clamp (legacy DPR behavior). Use `1568` for a safe Sonnet-aligned default; raise to `2576` only when the consumer is Opus or higher-fidelity is required. Applies to both DOM-render and `--pixel` paths.
+- `--format webp` — re-encode at the SW boundary via OffscreenCanvas. ~5–8× smaller than PNG at q=85 with no measurable VLM accuracy loss. Falls back to PNG for archive use cases. Default quality for WebP is 85; PNG/JPEG default to 92.
+- `--save` — write the bytes to disk in the CLI's CWD and **strip `dataUrl` from the result**. The structured stdout returns `{ filePath, format, size, width, height, mode }` instead of an inline base64 payload. Use this whenever you don't need to re-attach the image immediately — the path can be read back when needed and never bloats your context window.
+- `--selector <css>` — capture a single matching element. Off-screen elements supported.
+- `--element <ref>` — capture a refRegistry-tracked element (`e5`, `e2_7`).
+- `--region X,Y,W,H` — capture an arbitrary page rectangle.
+- `--scale <n>` — override pixel ratio. `--target-max-long-edge` wins when both set.
+- `--pixel` — pixel-true compositor capture via `chrome.tabs.captureVisibleTab`. Requires the browser window visible and focused. Use only when DOM-render fidelity is insufficient (compositor effects, hardware video frames, chrome itself).
+- `--pixel --full` — scroll-and-stitch full page. Throttled to clear Chrome's 2/sec `captureVisibleTab` quota; expect ~1.1s per viewport strip.
+
+Default DOM-render works from a backgrounded Chrome on a different macOS Space — no focus required.
+
+## Data, Storage, History, Bookmarks
+
+Use these for task-relevant state that lives outside the DOM. They are cheap reads — prefer them over inspecting the page when the answer lives in cookies, localStorage, or browsing history.
+
+```bash
+interceptor cookies example.com                         # List cookies for a domain
+interceptor cookies set '{"url":"https://example.com","name":"sid","value":"..."}'
+interceptor cookies delete https://example.com sid
+
+interceptor storage <key>                               # Read a localStorage key
+interceptor storage set <key> <value>                   # Write a localStorage entry
+interceptor storage delete <key>                        # Remove a localStorage entry
+interceptor storage <key> --session                     # Operate on sessionStorage instead
+
+interceptor history "search term"                       # Search browser history
+interceptor bookmarks "query"                           # Search bookmarks
+interceptor bookmarks tree                              # Full bookmark tree
+```
+
+Use the headers surface for tab-scoped request-header rewrites:
+
+```bash
+interceptor headers add x-debug 1                       # Append a request header rule
+interceptor headers remove x-debug                      # Remove a previously-added rule
+interceptor headers clear                               # Clear all header rules
+```
+
+## Batch, Raw, And Capabilities
+
+Use `batch` when several actions must run in a single round-trip without intermediate reads.
+
+```bash
+interceptor batch '[{"type":"click","ref":"e5"},{"type":"wait","ms":500},{"type":"extract_text"}]'
+interceptor batch '<json>' --stop-on-error
+interceptor batch '<json>' --timeout 30000
+```
+
+Use `raw` to send any action verbatim when no compound or low-level command exposes the shape you need. Prefer named commands first.
+
+```bash
+interceptor raw '{"type":"any_action","key":"value"}'
+```
+
+Use `capabilities` to discover which input layers are available (synthetic, OS, native bridge). For browser tasks the default is the synthetic layer (`act` and friends), backed by the pre-load `userActivation` override and the `__interceptor_trust` event marker — see Input Layer Priority. `--os` is a fallback for the rare site that defeats synthetic input; `macos` is for non-browser targets. Use `reload` after extension changes during local development.
+
+```bash
+interceptor capabilities
+interceptor reload
+```
 
 ## Recovery Rules
 

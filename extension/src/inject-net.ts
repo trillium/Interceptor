@@ -3,6 +3,31 @@ if ((window as any).__interceptor_net_installed) {
 } else {
   (window as any).__interceptor_net_installed = true
 
+  // Trust overrides — must run before any page bundle captures native getters.
+  // Pages tag synthetic events with `event.__interceptor_trust = true` to claim
+  // trusted-input semantics. Used to defeat user-activation gates on
+  // canvas-rendered editors (Google Docs, Slides, Sheets) where the only path
+  // to the editing model is through dispatched InputEvent / MouseEvent.
+  try {
+    const origIsTrusted = Object.getOwnPropertyDescriptor(Event.prototype, "isTrusted")
+    Object.defineProperty(Event.prototype, "isTrusted", {
+      configurable: true,
+      get(this: Event & { __interceptor_trust?: boolean }) {
+        if (this.__interceptor_trust === true) return true
+        return origIsTrusted && origIsTrusted.get ? origIsTrusted.get.call(this) : false
+      }
+    })
+  } catch {}
+
+  try {
+    const ua = (navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } }).userActivation
+    if (ua) {
+      const proto = Object.getPrototypeOf(ua)
+      Object.defineProperty(proto, "isActive", { configurable: true, get() { return true } })
+      Object.defineProperty(proto, "hasBeenActive", { configurable: true, get() { return true } })
+    }
+  } catch {}
+
   if ((window as any).trustedTypes?.createPolicy) {
     try {
       (window as any).trustedTypes.createPolicy("interceptor-net", {

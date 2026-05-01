@@ -2,8 +2,6 @@ import "./content/net-buffer"
 import "./content/canvas-bridge"
 import "./content/dom-observer"
 import "./content/monitor"
-import { extractLinkedInEventDom } from "./linkedin/event-page-dom-extraction"
-import { clickManageAttendeesShowMore, extractManageAttendeesModal, openManageAttendeesModal } from "./linkedin/event-attendees-modal-dom"
 import { getDomDirty, setDomDirty } from "./content/dom-observer"
 import { getStaleWarning, clearStaleWarning } from "./content/ref-registry"
 import { cacheSnapshot, computeSnapshotDiff } from "./content/snapshot-diff"
@@ -179,14 +177,6 @@ async function executeAction(action: Action): Promise<ActionResult> {
       case "scene_zoom":
       case "scene_profile":
         return await handleCanvasAction(action)
-      case "linkedin_event_dom":
-        return { success: true, data: await extractLinkedInEventDom(waitForDomStable, dispatchClickSequence) }
-      case "linkedin_attendees_open":
-        return { success: true, data: { opened: await openManageAttendeesModal(waitForDomStable, dispatchClickSequence) } }
-      case "linkedin_attendees_snapshot":
-        return { success: true, data: extractManageAttendeesModal() }
-      case "linkedin_attendees_show_more":
-        return { success: true, data: { clicked: clickManageAttendeesShowMore(dispatchClickSequence) } }
       case "wait_stable":         return handleWaitStable(action)
       case "batch": {
         const actions = action.actions as Array<Action>

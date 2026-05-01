@@ -224,6 +224,22 @@ final class DisplayDomain: DomainHandler, @unchecked Sendable {
             displayID = getID(display, displayIDSel)
         }
 
+        // register the virtual display with WindowServer and force
+        // extend mode. Without these calls, applySettings creates a display
+        // object that has a CGDirectDisplayID but is *not* in the active
+        // display list — Cocoa apps can't be moved onto it. Pattern from
+        // Lumen/Sunshine's vd_helper.m.
+        if displayID != 0 {
+            let mainID = CGMainDisplayID()
+            let mainWidth = Int32(CGDisplayPixelsWide(mainID))
+            // Place virtual to the right of main (offscreen for the user).
+            let activated = cgsActivateVirtualDisplay(displayID: displayID, originX: mainWidth)
+            Platform.log("virtual display \(displayID) activation via SLSConfigureDisplayEnabled: \(activated)")
+            // Switch to native 1× mode so visibleFrame matches requested resolution.
+            let modeSet = cgsSelectNativeDisplayMode(displayID: displayID, width: width, height: height)
+            Platform.log("virtual display \(displayID) native \(width)x\(height) mode set: \(modeSet)")
+        }
+
         let sid = UUID().uuidString.prefix(8).lowercased()
         let ctx = VirtualDisplayContext(display: display, displayID: displayID, width: width, height: height)
         lock.lock()

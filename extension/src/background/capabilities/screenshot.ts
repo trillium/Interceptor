@@ -29,28 +29,42 @@ function withCaptureTimeout<T>(operation: string, p: Promise<T>, ms = CAPTURE_TI
   })
 }
 
+function mimeTypeForFormat(format: string): string {
+  if (format === "webp") return "image/webp"
+  if (format === "png") return "image/png"
+  return "image/jpeg"
+}
+
 async function stitchStripsInWorker(
   strips: Array<{ dataUrl: string; y: number }>,
   totalWidth: number,
   totalHeight: number,
   format: string,
-  quality: number
+  quality: number,
+  scale: number = 1
 ): Promise<string | null> {
   try {
-    const canvas = new OffscreenCanvas(totalWidth, totalHeight)
+    // Scale during draw, not during allocation. Pre-computing scaled output
+    // dimensions avoids hitting the 16384 Skia ceiling on tall pages even if
+    // the natural canvas would have exceeded it.
+    const outWidth = Math.max(1, Math.round(totalWidth * scale))
+    const outHeight = Math.max(1, Math.round(totalHeight * scale))
+    const canvas = new OffscreenCanvas(outWidth, outHeight)
     const ctx = canvas.getContext("2d")
     if (!ctx) return null
     for (const strip of strips) {
       const res = await fetch(strip.dataUrl)
       const blob = await res.blob()
       const bmp = await createImageBitmap(blob)
-      ctx.drawImage(bmp, 0, strip.y)
+      const dx = 0
+      const dy = Math.round(strip.y * scale)
+      const dw = Math.round(bmp.width * scale)
+      const dh = Math.round(bmp.height * scale)
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, dx, dy, dw, dh)
       bmp.close?.()
     }
-    const outBlob = await canvas.convertToBlob({
-      type: format === "png" ? "image/png" : "image/jpeg",
-      quality
-    })
+    const mime = mimeTypeForFormat(format)
+    const outBlob = await canvas.convertToBlob({ type: mime, quality })
     const buf = await outBlob.arrayBuffer()
     // base64-encode
     let binary = ""
@@ -60,7 +74,7 @@ async function stitchStripsInWorker(
       binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
     }
     const b64 = btoa(binary)
-    return `data:${format === "png" ? "image/png" : "image/jpeg"};base64,${b64}`
+    return `data:${mime};base64,${b64}`
   } catch (err) {
     console.error("[stitchStripsInWorker] failed:", err)
     return null
@@ -91,14 +105,49 @@ async function injectScreenshotRunner(tabId: number): Promise<{ success: boolean
   }
 }
 
+// Re-encode a PNG/JPEG dataUrl as WebP using OffscreenCanvas.
+// html-to-image only emits PNG/JPEG, and chrome.tabs.captureVisibleTab only
+// accepts PNG/JPEG. WebP support is added by re-encoding at the SW boundary.
+async function reencodeAsWebP(dataUrl: string, qualityPct: number): Promise<string> {
+  const res = await fetch(dataUrl)
+  const blob = await res.blob()
+  const bmp = await createImageBitmap(blob)
+  try {
+    const canvas = new OffscreenCanvas(bmp.width, bmp.height)
+    const ctx = canvas.getContext("2d")
+    if (!ctx) throw new Error("OffscreenCanvas 2d context unavailable")
+    ctx.drawImage(bmp, 0, 0)
+    const out = await canvas.convertToBlob({ type: "image/webp", quality: Math.max(0, Math.min(1, qualityPct / 100)) })
+    const buf = await out.arrayBuffer()
+    let binary = ""
+    const bytes = new Uint8Array(buf)
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+    }
+    return `data:image/webp;base64,${btoa(binary)}`
+  } finally {
+    bmp.close?.()
+  }
+}
+
 async function handleDomRenderScreenshot(
   action: { type: string; [key: string]: unknown },
   tabId: number
 ): Promise<ActionResult> {
   const mode = resolveDomMode(action)
-  const format = (action.format as string) === "jpeg" ? "jpeg" : "png"
+  const requestedFormat = (action.format as string) === "webp" ? "webp"
+    : (action.format as string) === "jpeg" ? "jpeg"
+    : "png"
+  // For WebP requests, render PNG (lossless) in the content script and re-encode
+  // at the SW boundary. JPEG → WebP would double-lossy.
+  const renderFormat = requestedFormat === "webp" ? "png" : requestedFormat
   const quality = typeof action.quality === "number" ? (action.quality as number) : 92
+  // WebP default quality is 85; other formats keep their existing default of 92.
+  const webpQuality = typeof action.quality === "number" ? (action.quality as number) : 85
   const scale = typeof action.scale === "number" ? (action.scale as number) : undefined
+  const targetMaxLongEdge = typeof action.target_max_long_edge === "number"
+    ? (action.target_max_long_edge as number)
+    : undefined
 
   const region = (action.region || action.clip) as { x: number; y: number; width: number; height: number } | undefined
 
@@ -112,12 +161,13 @@ async function handleDomRenderScreenshot(
     const inject = await injectScreenshotRunner(tabId)
     if (!inject.success) return { success: false, error: inject.error || "runner injection failed" }
 
-    const dsAction: { type: string; [key: string]: unknown } = { type: "dom_screenshot", mode, format, quality }
+    const dsAction: { type: string; [key: string]: unknown } = { type: "dom_screenshot", mode, format: renderFormat, quality }
     if (action.ref !== undefined) dsAction.ref = action.ref
     if (action.element !== undefined) dsAction.index = action.element
     if (action.selector !== undefined) dsAction.selector = action.selector
     if (region) dsAction.region = region
     if (scale !== undefined) dsAction.scale = scale
+    if (targetMaxLongEdge !== undefined) dsAction.target_max_long_edge = targetMaxLongEdge
 
     const renderResult = await sendToContentScript(tabId, dsAction) as { success: boolean; error?: string; data?: { dataUrl: string; format: string; width: number; height: number; pixelRatio: number; mode: string } }
 
@@ -125,17 +175,27 @@ async function handleDomRenderScreenshot(
       return { success: false, error: renderResult?.error || "dom render returned no data" }
     }
 
-    const dataUrl = renderResult.data.dataUrl
+    let dataUrl = renderResult.data.dataUrl
     const width = renderResult.data.width
     const height = renderResult.data.height
+    let outputFormat = renderResult.data.format
+
+    if (requestedFormat === "webp") {
+      try {
+        dataUrl = await reencodeAsWebP(dataUrl, webpQuality)
+        outputFormat = "webp"
+      } catch (err) {
+        return { success: false, error: `webp re-encode failed: ${(err as Error).message}` }
+      }
+    }
 
     const sizeBytes = Math.round((dataUrl.length - dataUrl.indexOf(",") - 1) * 0.75)
 
     if (action.save) {
-      return { success: true, data: { dataUrl, format, size: sizeBytes, width, height, mode, save: true } }
+      return { success: true, data: { dataUrl, format: outputFormat, size: sizeBytes, width, height, mode, save: true } }
     }
 
-    return { success: true, data: { dataUrl, format, size: sizeBytes, width, height, mode } }
+    return { success: true, data: { dataUrl, format: outputFormat, size: sizeBytes, width, height, mode } }
   } finally {
     await uninstallScreenshotCorsRule(tabId)
   }
@@ -202,8 +262,18 @@ async function handlePixelScreenshot(
   action: { type: string; [key: string]: unknown },
   tabId: number
 ): Promise<ActionResult> {
-  const format = (action.format as string) === "png" ? "png" : "jpeg"
+  // Output format requested by caller. WebP is supported via OffscreenCanvas
+  // re-encode (chrome.tabs.captureVisibleTab itself only emits PNG/JPEG).
+  const requestedFormat = (action.format as string) === "webp" ? "webp"
+    : (action.format as string) === "png" ? "png"
+    : "jpeg"
+  // captureVisibleTab format: WebP requests use PNG strips (lossless source) so
+  // the OffscreenCanvas re-encode can produce a clean WebP output.
+  const captureFormat = requestedFormat === "webp" ? "png" : requestedFormat
   const quality = (action.quality as number) || 50
+  const targetMaxLongEdge = typeof action.target_max_long_edge === "number"
+    ? (action.target_max_long_edge as number)
+    : undefined
 
   if (action.full) {
     const dims = await sendToContentScript(tabId, { type: "get_page_dimensions" }) as {
@@ -234,7 +304,7 @@ async function handlePixelScreenshot(
       try {
         stripUrl = await withCaptureTimeout(
           `captureVisibleTab(strip ${i + 1}/${stripCount})`,
-          chrome.tabs.captureVisibleTab(fullTab.windowId, { format, quality })
+          chrome.tabs.captureVisibleTab(fullTab.windowId, { format: captureFormat, quality })
         )
       } catch (err) {
         await sendToContentScript(tabId, { type: "scroll_absolute", y: origScrollY }).catch(() => undefined)
@@ -259,19 +329,36 @@ async function handlePixelScreenshot(
     // SW ↔ offscreen-document IPC round-trip which silently drops
     // multi-hundred-KB messages. The SW already has access to
     // OffscreenCanvas + createImageBitmap (it's a Worker context).
+    //
+    // When target_max_long_edge is set, compute a downsample scale and pass it
+    // to the stitch so the output OffscreenCanvas allocation never approaches
+    // the 16384 Skia ceiling.
+    const naturalWidth = Math.round(viewportWidth * devicePixelRatio)
+    const naturalHeight = Math.round(scrollHeight * devicePixelRatio)
+    let stitchScale = 1
+    if (targetMaxLongEdge !== undefined && targetMaxLongEdge > 0) {
+      const longEdge = Math.max(naturalWidth, naturalHeight)
+      if (longEdge > targetMaxLongEdge) stitchScale = targetMaxLongEdge / longEdge
+    }
+    // WebP output uses default quality 85; PNG/JPEG keep their existing
+    // quality semantics.
+    const stitchQuality = requestedFormat === "webp"
+      ? (typeof action.quality === "number" ? (action.quality as number) : 85) / 100
+      : quality / 100
     const stitchedUrl = await stitchStripsInWorker(
       strips,
-      Math.round(viewportWidth * devicePixelRatio),
-      Math.round(scrollHeight * devicePixelRatio),
-      format,
-      quality / 100
+      naturalWidth,
+      naturalHeight,
+      requestedFormat,
+      stitchQuality,
+      stitchScale
     )
     if (!stitchedUrl) return { success: false, error: "stitch failed (could not render strips into OffscreenCanvas)" }
     const stitchedSize = Math.round((stitchedUrl.length - stitchedUrl.indexOf(",") - 1) * 0.75)
     if (action.save) {
-      return { success: true, data: { dataUrl: stitchedUrl, format, size: stitchedSize, save: true, strips: stripCount } }
+      return { success: true, data: { dataUrl: stitchedUrl, format: requestedFormat, size: stitchedSize, save: true, strips: stripCount } }
     }
-    return { success: true, data: { dataUrl: stitchedUrl, format, size: stitchedSize, strips: stripCount } }
+    return { success: true, data: { dataUrl: stitchedUrl, format: requestedFormat, size: stitchedSize, strips: stripCount } }
   }
 
   const targetTab = await chrome.tabs.get(tabId).catch(() => null)
@@ -291,7 +378,7 @@ async function handlePixelScreenshot(
   try {
     dataUrl = await withCaptureTimeout(
       "captureVisibleTab",
-      chrome.tabs.captureVisibleTab(targetTab.windowId, { format, quality })
+      chrome.tabs.captureVisibleTab(targetTab.windowId, { format: captureFormat, quality })
     )
   } catch (err) {
     if (err instanceof CaptureTimeoutError) {
@@ -310,11 +397,6 @@ async function handlePixelScreenshot(
     }
     return fallback
   }
-  const sizeBytes = Math.round((dataUrl.length - dataUrl.indexOf(",") - 1) * 0.75)
-
-  if (action.save) {
-    return { success: true, data: { dataUrl, format, size: sizeBytes, save: true } }
-  }
 
   let clip = action.clip as { x: number; y: number; width: number; height: number } | undefined
   if (!clip && action.element !== undefined) {
@@ -329,18 +411,86 @@ async function handlePixelScreenshot(
       success: boolean; data?: string; error?: string
     }
     if (!cropResult.success) return { success: false, error: cropResult.error }
-    const croppedUrl = cropResult.data!
-    const croppedSize = Math.round((croppedUrl.length - croppedUrl.indexOf(",") - 1) * 0.75)
-    return { success: true, data: { dataUrl: croppedUrl, format, size: croppedSize, clip } }
+    dataUrl = cropResult.data!
   }
 
-  if (format === "png" && sizeBytes > 800 * 1024) {
+  // Post-capture transform — downsample to fit target_max_long_edge and/or
+  // re-encode to WebP. Done in one OffscreenCanvas pass for efficiency.
+  const transformed = await transformPixelDataUrl(dataUrl, requestedFormat, action.quality as number | undefined, targetMaxLongEdge)
+  if (!transformed.success) return { success: false, error: transformed.error || "post-capture transform failed" }
+  const finalUrl = transformed.dataUrl
+  const finalSize = Math.round((finalUrl.length - finalUrl.indexOf(",") - 1) * 0.75)
+
+  if (action.save) {
+    return { success: true, data: { dataUrl: finalUrl, format: requestedFormat, size: finalSize, save: true } }
+  }
+
+  if (clip) {
+    return { success: true, data: { dataUrl: finalUrl, format: requestedFormat, size: finalSize, clip } }
+  }
+
+  if (requestedFormat === "png" && finalSize > 800 * 1024) {
     return {
       success: true,
-      data: { dataUrl, format, size: sizeBytes, warning: "PNG exceeds 800KB — consider using JPEG for smaller responses" }
+      data: { dataUrl: finalUrl, format: requestedFormat, size: finalSize, warning: "PNG exceeds 800KB — consider using JPEG or WebP for smaller responses" }
     }
   }
-  return { success: true, data: { dataUrl, format, size: sizeBytes } }
+  return { success: true, data: { dataUrl: finalUrl, format: requestedFormat, size: finalSize } }
+}
+
+// Post-capture transform for the pixel path. Applies downsample
+// (target_max_long_edge) and/or format re-encode (PNG/JPEG/WebP) in one
+// OffscreenCanvas pass. Returns the same dataUrl unchanged when no transform
+// is needed, so callers pay zero cost for default invocations.
+async function transformPixelDataUrl(
+  dataUrl: string,
+  requestedFormat: string,
+  quality: number | undefined,
+  targetMaxLongEdge: number | undefined
+): Promise<{ success: true; dataUrl: string } | { success: false; error: string }> {
+  // Detect current MIME from the dataUrl prefix so we can short-circuit no-ops.
+  const currentMime = dataUrl.startsWith("data:image/webp") ? "webp"
+    : dataUrl.startsWith("data:image/png") ? "png"
+    : "jpeg"
+  const formatChange = currentMime !== requestedFormat
+  const needsDownsample = targetMaxLongEdge !== undefined && targetMaxLongEdge > 0
+  if (!formatChange && !needsDownsample) {
+    return { success: true, dataUrl }
+  }
+  try {
+    const res = await fetch(dataUrl)
+    const blob = await res.blob()
+    const bmp = await createImageBitmap(blob)
+    try {
+      let scale = 1
+      if (needsDownsample) {
+        const longEdge = Math.max(bmp.width, bmp.height)
+        if (longEdge > targetMaxLongEdge!) scale = targetMaxLongEdge! / longEdge
+      }
+      const outWidth = Math.max(1, Math.round(bmp.width * scale))
+      const outHeight = Math.max(1, Math.round(bmp.height * scale))
+      const canvas = new OffscreenCanvas(outWidth, outHeight)
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return { success: false, error: "OffscreenCanvas 2d context unavailable" }
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, 0, 0, outWidth, outHeight)
+      const mime = mimeTypeForFormat(requestedFormat)
+      const encodeQuality = requestedFormat === "webp"
+        ? Math.max(0, Math.min(1, (typeof quality === "number" ? quality : 85) / 100))
+        : Math.max(0, Math.min(1, (typeof quality === "number" ? quality : 50) / 100))
+      const outBlob = await canvas.convertToBlob({ type: mime, quality: encodeQuality })
+      const buf = await outBlob.arrayBuffer()
+      let binary = ""
+      const bytes = new Uint8Array(buf)
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+      }
+      return { success: true, dataUrl: `data:${mime};base64,${btoa(binary)}` }
+    } finally {
+      bmp.close?.()
+    }
+  } catch (err) {
+    return { success: false, error: `transform failed: ${(err as Error).message}` }
+  }
 }
 
 // ─── Public dispatcher ────────────────────────────────────────────────────────
@@ -361,7 +511,7 @@ export async function handleScreenshotActions(
 
     case "screenshot": {
       // --pixel flag routes to the legacy captureVisibleTab path. Default
-      // path is the new DOM-render pipeline (PRD-44).
+      // path is the DOM-render pipeline.
       if (action.pixel === true) {
         return handlePixelScreenshot(action, tabId)
       }

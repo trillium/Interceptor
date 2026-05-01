@@ -60,12 +60,33 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         let filter = action["filter"] as? String ?? "interactive"
         let maxChars = action["maxChars"] as? Int ?? 50000
 
+        // wake up the AX tree for Electron / Chromium apps.
+        // Electron and Chromium-based apps (Slack, Discord, Signal, VS Code,
+        // Cursor, Brave, Chrome, Notion) build their AX tree lazily — only when
+        // an assistive client signals interest. Setting AXManualAccessibility
+        // and AXEnhancedUserInterface to true on the app element triggers the
+        // tree generation. Without this, `mac_tree --app Signal` returns empty
+        // when Signal is in the background.
+        // Refs: AXUIElement.h, Apple a11y guides, Chromium a11y_extension.cc.
+        Self.wakeAXTree(app: axApp)
+
         refRegistry.clear()
 
         var output = ""
         buildTree(element: axApp, depth: 0, maxDepth: depth, filter: filter, output: &output, maxChars: maxChars)
 
         completion(WireFormat.success(output))
+    }
+
+    /// signal AX interest to Electron/Chromium apps so they expose
+    /// their full AX tree. Idempotent — safe to call repeatedly.
+    static func wakeAXTree(app: AXUIElement) {
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        // Tiny grace so Chromium's BrowserAccessibilityManager has a chance
+        // to assemble the tree before we walk it. ~30 ms is enough on M-series
+        // for typical Electron renderers.
+        usleep(30_000)
     }
 
     private func buildTree(element: AXUIElement, depth: Int, maxDepth: Int, filter: String, output: inout String, maxChars: Int) {
@@ -300,6 +321,7 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         }
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        Self.wakeAXTree(app: axApp)
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focused) == .success else {
             completion(WireFormat.error("no focused element"))
@@ -330,6 +352,7 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         }
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        Self.wakeAXTree(app: axApp)
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
               let windows = windowsRef as? [AXUIElement] else {

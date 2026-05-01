@@ -74,9 +74,10 @@ Capture:
   interceptor screenshot --region X,Y,W,H   Capture page region (rendered + cropped)
   interceptor screenshot --scale 2           Override pixel ratio (e.g. retina from 1x display)
   interceptor screenshot --pixel             Pixel-true compositor capture (legacy captureVisibleTab — requires Chrome focused)
-  interceptor screenshot --save              Save to disk in addition to returning data URL
-  interceptor screenshot --format png        PNG format (default: png for DOM render, jpeg for --pixel)
-  interceptor screenshot --quality 80        JPEG quality 0-100
+  interceptor screenshot --save              Save to disk; result has filePath, no dataUrl
+  interceptor screenshot --format png        Output format: png (default), jpeg, or webp
+  interceptor screenshot --quality 80        Encode quality 0-100 (defaults: png 92, jpeg 92, webp 85)
+  interceptor screenshot --target-max-long-edge 1568   Clamp output long edge in pixels (auto-resize at capture)
   interceptor screenshot --clip X,Y,W,H     [deprecated alias for --region]
   interceptor eval <code>                    Run JS in isolated world
   interceptor eval <code> --main             Run JS in page context
@@ -111,10 +112,6 @@ SSE Stream Capture:
   interceptor sse log [--filter <pattern>] [--limit N]   Show completed SSE streams
   interceptor sse streams                                  List active SSE streams
   interceptor sse tail [--filter <pattern>]                Live tail SSE stream chunks
-
-LinkedIn:
-  interceptor linkedin event [url]           Extract LinkedIn event + post data via network and DOM validation
-  interceptor linkedin attendees [url]       Extract LinkedIn event attendees with request override, batching, and enrichment
 
 Headers:
   interceptor headers add <name> <value>     Add request header
@@ -188,16 +185,6 @@ Recording (Session Monitor):
     --json                               Raw JSONL for the session
     --plan                               Emit a 'interceptor ...' replay script
     --with-bodies                        (P1) Merge cached response bodies
-
-ChatGPT Agentic Bridge:
-  interceptor chatgpt send "<prompt>"           Send a message, read response
-    --stream                             Print tokens as they stream
-  interceptor chatgpt read                      Read current conversation from DOM
-  interceptor chatgpt status                    Show streaming state and model
-  interceptor chatgpt conversations             List recent conversations
-  interceptor chatgpt switch <conversation-id>  Navigate to conversation
-  interceptor chatgpt model [name]              Read or change the active model
-  interceptor chatgpt stop                      Stop current generation
 
 Meta:
   interceptor status                         Check daemon status (local — no connection needed)

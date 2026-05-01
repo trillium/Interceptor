@@ -8,23 +8,24 @@ import { parseCodexJsonl } from "./usage"
 import { validateCommandPolicy, validateFinalAnswerPolicy } from "./validation"
 import { deterministicGrade } from "./validators"
 import { artifactDirFor, BENCH_ROOT, ensureDir, fileExists, loadConfig, nowStamp, schemaPath, shellResult, writeJson, writeText } from "./utils"
+import { codexHomeForCondition } from "./codex-home"
 import type { AgentFinalMessage, BenchConfig, ConditionDef, RunEnvironment, RunResult, RunSpec, TaskDef } from "./types"
 
 function environment(config: BenchConfig): RunEnvironment {
-  const interceptorStatus = shellResult("interceptor status", { timeoutMs: 10_000 })
-  const axiHelp = shellResult("chrome-devtools-axi --version", { timeoutMs: 10_000 })
-  const browser = shellResult("interceptor tabs --json", { timeoutMs: 10_000 })
+  const interceptorStatus = shellResult("interceptor status")
+  const axiHelp = shellResult("chrome-devtools-axi --version")
+  const browser = shellResult("interceptor tabs --json")
   const axiCommit = process.env.AXI_REPO_PATH
-    ? shellResult("git rev-parse HEAD", { cwd: process.env.AXI_REPO_PATH, timeoutMs: 10_000 }).stdout.trim() || undefined
+    ? shellResult("git rev-parse HEAD", { cwd: process.env.AXI_REPO_PATH }).stdout.trim() || undefined
     : undefined
   return {
-    os: shellResult("sw_vers -productVersion", { timeoutMs: 10_000 }).stdout.trim() || process.platform,
+    os: shellResult("sw_vers -productVersion").stdout.trim() || process.platform,
     browser: browser.ok ? "browser-present" : "unknown",
     interceptorVersion: interceptorStatus.ok ? "0.1.0" : undefined,
     axiVersion: axiHelp.ok ? axiHelp.stdout.trim() : undefined,
-    interceptorCommit: shellResult("git rev-parse HEAD", { timeoutMs: 10_000 }).stdout.trim() || undefined,
+    interceptorCommit: shellResult("git rev-parse HEAD").stdout.trim() || undefined,
     axiCommit,
-    fixtureVersion: shellResult("git rev-parse HEAD", { timeoutMs: 10_000 }).stdout.trim() || undefined,
+    fixtureVersion: shellResult("git rev-parse HEAD").stdout.trim() || undefined,
     codexModel: config.models.agent.model,
   }
 }
@@ -73,7 +74,15 @@ function parseFinal(artifactDir: string): AgentFinalMessage {
   if (!fileExists(path)) {
     return { answer: "", evidence: [] }
   }
-  return JSON.parse(readFileSync(path, "utf-8")) as AgentFinalMessage
+  const raw = readFileSync(path, "utf-8").trim()
+  if (!raw) {
+    return { answer: "", evidence: [] }
+  }
+  try {
+    return JSON.parse(raw) as AgentFinalMessage
+  } catch {
+    return { answer: "", evidence: [] }
+  }
 }
 
 function invalidGrade(reason: string) {
@@ -109,10 +118,12 @@ export function runOne(spec: RunSpec, config = loadConfig()): RunResult {
   let agentResult = { ok: false, stdout: "", stderr: "" }
   let wallClock = 0
   if (!setupError) {
+    const codexHome = codexHomeForCondition(condition.id)
+    writeJson(join(artifactDir, "codex-home.json"), { role: codexHome.role, path: codexHome.path })
     const started = Date.now()
     agentResult = shellResult(codexCommand(config, condition, task, artifactDir), {
       cwd: benchmarkAgentCwd(spec),
-      timeoutMs: config.runPolicy.timeoutSeconds * 1000,
+      env: { CODEX_HOME: codexHome.path },
     })
     wallClock = (Date.now() - started) / 1000
   }

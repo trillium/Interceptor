@@ -1,6 +1,5 @@
 import { sendToContentScript } from "./content-bridge"
 import { activeTransport } from "./transport"
-import { buildLinkedInEventExtraction, buildLinkedInAttendeesExtraction } from "./linkedin-orchestration"
 import { handleOsInputActions } from "./capabilities/os-input"
 import { handleScreenshotActions } from "./capabilities/screenshot"
 import { handleCaptureStreamActions } from "./capabilities/capture-stream"
@@ -106,9 +105,6 @@ export async function routeAction(
   if (PASSIVE_NET_ACTIONS.has(action.type)) return handlePassiveNetActions(action, tabId)
   if (CDP_NETWORK_ACTIONS.has(action.type)) return handleCdpNetworkActions(action, tabId)
   if (MONITOR_ACTIONS.has(action.type)) return handleMonitorActions(action, tabId)
-
-  if (action.type === "linkedin_event_extract") return buildLinkedInEventExtraction(tabId, action)
-  if (action.type === "linkedin_attendees_extract") return buildLinkedInAttendeesExtraction(tabId, action)
 
   // Default: forward to content script
   const contentResult = await sendToContentScript(

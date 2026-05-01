@@ -32,6 +32,15 @@ let menuDomain = MenuDomain()
 let textDomain = TextDomain()
 let compoundDomain = CompoundDomain(router: router)
 
+// native filesystem, networking, log, app intent, container, and overlay
+// domains. See docs/native/README.md for the full surface.
+let overlayDomain = OverlayDomain()
+let fsDomain = FsDomain()
+let netDomain = NetDomain()
+let logDomain = LogDomain()
+let intentDomain = IntentDomain()
+let containerDomain = ContainerDomain()
+
 router.register("tree", handler: accessibilityDomain)
 router.register("find", handler: accessibilityDomain)
 router.register("inspect", handler: accessibilityDomain)
@@ -71,6 +80,15 @@ router.register("menu", handler: menuDomain)
 router.register("text", handler: textDomain)
 router.register("compound", handler: compoundDomain)
 
+// register the six new domain prefixes. Wire format is
+// `macos_<prefix>_<command>` so e.g. `macos_overlay_start` routes here.
+router.register("overlay", handler: overlayDomain)
+router.register("fs", handler: fsDomain)
+router.register("url", handler: netDomain)
+router.register("log", handler: logDomain)
+router.register("intent", handler: intentDomain)
+router.register("container", handler: containerDomain)
+
 do {
     let transport = try Transport(router: router)
     transport.start()
@@ -82,14 +100,28 @@ do {
 Platform.log("interceptor-bridge ready on \(Platform.bridgeSocketPath)")
 Platform.emitEvent("bridge_started")
 
+// ensure overlays do not outlive the bridge process. On
+// SIGINT/SIGTERM, signal handlers below trigger overlay teardown via a
+// stored global reference. `signal()` requires a C-callable function
+// pointer that cannot capture Swift state, so the overlayDomain instance
+// is exposed through a global variable and dispatched on the main thread
+// (overlays are AppKit objects). The per-overlay `timeout_seconds` knob
+// + the panic hotkey + the engine-side per-session cleanup are the other
+// layers of the safety net.
+GlobalOverlayDomainRef.shared = overlayDomain
+
 signal(SIGINT) { _ in
     Platform.log("SIGINT received — shutting down")
+    GlobalOverlayDomainRef.shared?.handle("stop", action: ["sub": "stop"]) { _ in }
+    Thread.sleep(forTimeInterval: 0.1)
     Platform.cleanup()
     exit(0)
 }
 
 signal(SIGTERM) { _ in
     Platform.log("SIGTERM received — shutting down")
+    GlobalOverlayDomainRef.shared?.handle("stop", action: ["sub": "stop"]) { _ in }
+    Thread.sleep(forTimeInterval: 0.1)
     Platform.cleanup()
     exit(0)
 }

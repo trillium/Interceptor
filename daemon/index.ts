@@ -43,6 +43,29 @@ function isBridgeAlive(): boolean {
 function spawnBridge(): void {
   if (bridgeSpawnAttempted) return
   bridgeSpawnAttempted = true
+
+  // Prefer launching the .app bundle via LaunchServices (`open -gj`).
+  // A direct fork-exec of the inner binary does not give the process
+  // aqua-session ancestry, so macOS silently denies Apple Events without
+  // showing the TCC consent dialog. Bundle launch fixes that — and TCC will
+  // then track the bridge by CFBundleIdentifier (com.interceptor.bridge).
+  const installedBundle = `${process.env.HOME ?? ""}/.local/share/interceptor/interceptor-bridge.app`
+  const distBundle = new URL("../dist/interceptor-bridge.app", import.meta.url).pathname
+  const candidateBundle = existsSync(installedBundle)
+    ? installedBundle
+    : (existsSync(distBundle) ? distBundle : "")
+
+  if (candidateBundle) {
+    log(`spawning bridge via LaunchServices: open -gj ${candidateBundle}`)
+    const child = spawn("/usr/bin/open", ["-gj", candidateBundle], { detached: true, stdio: "ignore" })
+    child.unref()
+    setTimeout(() => { bridgeSpawnAttempted = false }, 10000)
+    return
+  }
+
+  // Fallback: direct spawn of the inner binary (development builds without
+  // a bundle). Apple Events / TCC will not work in this mode — used only
+  // when the user is iterating on the Swift sources.
   const bridgeBin = new URL("../interceptor-bridge/.build/debug/interceptor-bridge", import.meta.url).pathname
   const releaseBin = new URL("../interceptor-bridge/.build/release/interceptor-bridge", import.meta.url).pathname
   const distBin = new URL("../dist/interceptor-bridge", import.meta.url).pathname
@@ -54,7 +77,7 @@ function spawnBridge(): void {
     log("bridge binary not found — cannot auto-spawn")
     return
   }
-  log(`spawning bridge: ${bin}`)
+  log(`spawning bridge (bare-binary fallback, no TCC consent UI): ${bin}`)
   const child = spawn(bin, [], { detached: true, stdio: "ignore" })
   child.unref()
   // Give it time to start

@@ -83,11 +83,36 @@ final class Transport: @unchecked Sendable {
         }
     }
 
-    private static func handleClient(fd: Int32, router: Router) {
+    // per-connection state held by the read loop. The read loop
+    // never blocks on a router callback completing; instead each request is
+    // dispatched to a global worker queue, and the per-fd serial writeQueue
+    // serializes the actual `Darwin.write(fd, ...)` so framed bytes from
+    // concurrent completions never interleave on the wire. The DispatchGroup
+    // tracks every in-flight request so the read loop's exit path can drain
+    // pending writes before closing the fd.
+    /// Exposed at module-internal access so `@testable import interceptor_bridge`
+    /// can drive a `socketpair`-backed handleClient in tests.
+    static func handleClient(fd: Int32, router: Router) {
         var buffer = Data()
         let readBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: 65536)
+
+        let writeQueue = DispatchQueue(label: "interceptor-bridge.write.\(fd)", qos: .userInitiated)
+        let workQueue = DispatchQueue.global(qos: .userInitiated)
+        let inflightGroup = DispatchGroup()
+        let inflightCounter = InflightCounter()
+
         defer {
             readBuf.deallocate()
+            // drain in-flight router callbacks + their writeQueue
+            // tasks before closing the fd. group.wait() waits for every
+            // group.enter() (request received) to be matched by group.leave()
+            // (response written or write failure). writeQueue.sync afterwards
+            // is a belt-and-braces flush — group.leave() runs inside the
+            // writeQueue closure, so once the group is drained the queue is
+            // empty, but a sync barrier is cheap and makes the ordering
+            // self-evident to readers.
+            inflightGroup.wait()
+            writeQueue.sync { }
             Darwin.close(fd)
             Platform.log("client disconnected (fd: \(fd))")
         }
@@ -115,7 +140,11 @@ final class Transport: @unchecked Sendable {
                 buffer = Data(buffer[frameLen...])
 
                 guard let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
-                    Transport.sendFramed(fd: fd, response: ["error": "invalid JSON"])
+                    // Synchronous write of an error frame is fine here — we
+                    // have not yet entered the in-flight group for this id.
+                    if let frame = Transport.encodeFrame(response: ["error": "invalid JSON"]) {
+                        writeQueue.sync { Transport.writeFrame(fd: fd, frame: frame) }
+                    }
                     continue
                 }
 
@@ -123,39 +152,113 @@ final class Transport: @unchecked Sendable {
                 let action = json["action"] as? [String: Any] ?? [:]
                 let actionType = action["type"] as? String ?? "unknown"
 
-                Platform.log("request \(requestId.prefix(8)) \(actionType)")
+                let inflight = inflightCounter.increment()
+                Platform.log("request \(requestId.prefix(8)) \(actionType) inflight=\(inflight)")
 
                 let startTime = Date()
-                let sem = DispatchSemaphore(value: 0)
+                inflightGroup.enter()
 
-                router.route(action: action) { result in
-                    let duration = Date().timeIntervalSince(startTime) * 1000
-                    let success = result["success"] as? Bool ?? false
-                    Platform.log("response \(requestId.prefix(8)) \(success ? "ok" : "err") \(actionType) \(Int(duration))ms")
+                // dispatch each request onto the global worker
+                // queue. The read loop continues immediately to the next
+                // frame — one slow router callback no longer blocks
+                // unrelated requests on the same connection. `action` is
+                // `[String: Any]` (not Sendable under Swift 6 strict
+                // concurrency) so we wrap it in an unchecked-Sendable box
+                // for the queue hop. Router.route already documents that
+                // its action parameter is consumed exactly once.
+                let actionBox = UncheckedSendableBox(action)
+                workQueue.async {
+                    router.route(action: actionBox.value) { result in
+                        let duration = Date().timeIntervalSince(startTime) * 1000
+                        let success = result["success"] as? Bool ?? false
+                        let remaining = inflightCounter.decrement()
+                        Platform.log("response \(requestId.prefix(8)) \(success ? "ok" : "err") \(actionType) \(Int(duration))ms inflight=\(remaining)")
 
-                    let response: [String: Any] = [
-                        "id": requestId,
-                        "result": result
-                    ]
-                    Transport.sendFramed(fd: fd, response: response)
-                    sem.signal()
+                        // Serialize the response on the worker queue (off
+                        // the read thread, off the writeQueue) so we hand
+                        // an already-framed `Data` blob across the queue
+                        // boundary — `[String: Any]` is not Sendable, but
+                        // `Data` is.
+                        let response: [String: Any] = [
+                            "id": requestId,
+                            "result": result
+                        ]
+                        let frame = Transport.encodeFrame(response: response)
+
+                        // writes are serialized per-fd so frame
+                        // bytes from concurrent completions cannot interleave.
+                        // group.leave() is called from inside the writeQueue
+                        // closure so the read loop's exit-path drain
+                        // (inflightGroup.wait()) actually waits until the
+                        // bytes are out the door.
+                        writeQueue.async {
+                            if let frame = frame {
+                                Transport.writeFrame(fd: fd, frame: frame)
+                            }
+                            inflightGroup.leave()
+                        }
+                    }
                 }
-
-                sem.wait()
             }
         }
     }
 
-    private static func sendFramed(fd: Int32, response: [String: Any]) {
+    /// serialize a response dict to the framed wire format. Returns
+    /// nil and logs if JSON encoding fails. Done OFF the writeQueue so we
+    /// hand a Sendable `Data` across queue boundaries (`[String: Any]` is
+    /// not Sendable under Swift 6 strict concurrency).
+    fileprivate static func encodeFrame(response: [String: Any]) -> Data? {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: response) else {
             Platform.log("failed to serialize response")
-            return
+            return nil
         }
         var length = UInt32(jsonData.count)
         let header = Data(bytes: &length, count: 4)
-        let frame = header + jsonData
+        return header + jsonData
+    }
+
+    /// caller MUST already be running on the per-fd writeQueue so
+    /// frame bytes cannot interleave with a concurrent in-flight write.
+    fileprivate static func writeFrame(fd: Int32, frame: Data) {
         frame.withUnsafeBytes { ptr in
             _ = Darwin.write(fd, ptr.baseAddress!, frame.count)
         }
+    }
+}
+
+/// tiny `@unchecked Sendable` wrapper so we can pass non-Sendable
+/// values (here, the parsed action `[String: Any]`) across a queue
+/// boundary without a torrent of warnings. The transport hands the action
+/// to exactly one consumer (`router.route`) which lives on the worker
+/// queue, so concurrent access is not a real risk.
+struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
+/// tiny lock-protected counter used to stamp `inflight=N` onto
+/// `request`/`response` log lines, giving operators a queue-depth signal
+/// now that the read loop no longer serializes per-fd. The counter is
+/// per-connection (constructed inside `handleClient`).
+final class InflightCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count: Int = 0
+
+    /// Increment and return the new value (for the `request` log line).
+    func increment() -> Int {
+        lock.lock()
+        count += 1
+        let now = count
+        lock.unlock()
+        return now
+    }
+
+    /// Decrement and return the new value (for the `response` log line).
+    func decrement() -> Int {
+        lock.lock()
+        count = max(0, count - 1)
+        let now = count
+        lock.unlock()
+        return now
     }
 }

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { shellResult, schemaPath, writeText } from "./utils"
+import { codexHomeForJudge } from "./codex-home"
 import type { AgentFinalMessage, JudgeGrade, ModelsConfig, TaskDef } from "./types"
 
 function judgePrompt(task: TaskDef, final: AgentFinalMessage): string {
@@ -31,9 +32,10 @@ export function runJudge(task: TaskDef, final: AgentFinalMessage, models: Models
     `-o ${outputPath}`,
     JSON.stringify(prompt),
   ].join(" ")
+  const judgeHome = codexHomeForJudge()
   const result = shellResult(command, {
     cwd: "/tmp",
-    timeoutMs: 180_000,
+    env: { CODEX_HOME: judgeHome.path },
   })
   writeText(`${artifactDir}/judge-output.jsonl`, result.stdout)
   writeText(`${artifactDir}/judge-stderr.txt`, result.stderr)

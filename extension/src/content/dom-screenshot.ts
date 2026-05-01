@@ -27,6 +27,7 @@ type DomScreenshotAction = {
   format?: "png" | "jpeg"
   quality?: number
   scale?: number
+  target_max_long_edge?: number
 }
 
 type H2iLib = {
@@ -120,9 +121,33 @@ export async function handleDomScreenshot(action: DomScreenshotAction): Promise<
 
   const format = action.format === "jpeg" ? "jpeg" : "png"
   const qualityPct = typeof action.quality === "number" ? Math.max(1, Math.min(100, action.quality)) : 92
-  const pixelRatio = typeof action.scale === "number" && action.scale > 0
+  const basePixelRatio = typeof action.scale === "number" && action.scale > 0
     ? action.scale
     : (window.devicePixelRatio || 1)
+
+  // Clamp pixelRatio so the rasterized canvas long-edge fits a caller-supplied
+  // budget. Without a budget, behavior is unchanged.
+  // Long-edge source: full/region modes use the document's scroll size; element
+  // and selector modes use the resolved node's bounding rect.
+  let pixelRatio = basePixelRatio
+  const target = typeof action.target_max_long_edge === "number" && action.target_max_long_edge > 0
+    ? action.target_max_long_edge
+    : undefined
+  if (target !== undefined) {
+    const mode = action.mode || "full"
+    let longEdgeCss: number
+    if (mode === "full" || mode === "region") {
+      const docW = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0)
+      const docH = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0)
+      longEdgeCss = Math.max(docW, docH)
+    } else {
+      const rect = node.getBoundingClientRect()
+      longEdgeCss = Math.max(rect.width, rect.height)
+    }
+    if (longEdgeCss > 0 && longEdgeCss * pixelRatio > target) {
+      pixelRatio = Math.max(0.05, target / longEdgeCss)
+    }
+  }
 
   // 1×1 transparent PNG used as a placeholder for any image that html-to-image
   // can't fetch CORS-clean. Without a placeholder, the library falls back to

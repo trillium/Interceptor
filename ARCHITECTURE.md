@@ -119,7 +119,7 @@ Plus:
 | `user_stop` | `monitor_stop` action |
 | `tab_closed` | `tabs.onRemoved` |
 
-### Durability — three layers (PRD-32)
+### Durability — three layers
 
 ```
 ┌─────────────────────────────────┐
@@ -152,7 +152,7 @@ Plus:
 
 `monitor_stop` (and `tabs.onRemoved`) wrap their `detachAttachment` + `sendToHost(mon_stop)` in `try` and run `sessions.delete` / `activeSessionByTab.delete` / `clearPendingChildTabsForSession` in `finally`. Cleanup is now guaranteed even if transport raises.
 
-### Network body persistence (PRD-32)
+### Network body persistence
 
 `extension/src/inject-net.ts` (MAIN world) monkey-patches `fetch` and `XHR`, dispatching `__interceptor_net` custom events with body + content-type. The content script's monitor listens for those events; when a fetch is correlated to a recent trusted user action (`cause`), it builds a redacted, capped preview (`buildBodyPreview` in [`extension/src/content/monitor.ts`](extension/src/content/monitor.ts)) and emits an enriched `fetch` / `xhr` / `sse` event with `bp` (body preview), `bt` (bytes), `trn` (truncated), `ct` (content type) fields.
 

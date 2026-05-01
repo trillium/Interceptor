@@ -310,7 +310,7 @@ describe("monitor sparse format + renderer + plan generator", () => {
     expect(out).toContain("{\"ok\":true}")
   })
 
-  test("buildPlan emits tab switch for focus_switch attachments (PRD-34)", () => {
+  test("buildPlan emits tab switch for focus_switch attachments", () => {
     writeFixture([
       { event: "mon_start",  sid: "focus-alpha", s: 0, t: 1000, tid: 1, url: "http://localhost:21113/" },
       { event: "mon_attach", sid: "focus-alpha", s: 1, t: 1001, tid: 1, doc: "docA", reason: "start", u: "http://localhost:21113/" },
