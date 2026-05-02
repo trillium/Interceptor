@@ -14,6 +14,28 @@ for arg in "$@"; do
   esac
 done
 
+stamp_version() {
+  local sha date pkg_version
+  sha=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
+  date=$(date -u +%Y-%m-%d)
+  pkg_version=$(grep '"version"' package.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+  cat > cli/version.ts <<EOF
+// Sentinel values used when running from source (\`bun run cli\`).
+// scripts/build.sh stamps real build values into this file just before
+// each \`bun build --compile\` and restores it afterwards via \`git checkout\`.
+export const VERSION = "$pkg_version"
+export const BUILD_SHA = "$sha"
+export const BUILD_DATE = "$date"
+EOF
+}
+
+restore_version() {
+  git checkout cli/version.ts 2>/dev/null || true
+}
+
+trap restore_version EXIT
+stamp_version
+
 build_extension() {
   echo "Building extension..."
   rm -rf extension/dist

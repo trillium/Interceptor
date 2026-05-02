@@ -21,6 +21,7 @@ import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
+import { VERSION, BUILD_SHA, BUILD_DATE } from "./version"
 
 // Command → module routing
 const STATE_CMDS = new Set(["state", "tree", "diff", "find", "text", "html"])
@@ -45,6 +46,17 @@ const INIT_CMDS = new Set(["init"])
 // Commands that don't require a daemon connection (or, in init's case,
 // bootstrap it themselves rather than relying on the pre-dispatch auto-spawn).
 const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "init"])
+
+// Every command the CLI dispatches. Used to reject unknown commands
+// before any daemon-spawning side effect runs.
+const ALL_KNOWN_CMDS = new Set<string>([
+  ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
+  ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
+  ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
+  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
+  ...UPGRADE_CMDS, ...INIT_CMDS,
+  "help",
+])
 
 // Monitor subcommands that are handled locally (no daemon needed)
 const MONITOR_LOCAL_SUBCOMMANDS = new Set(["tail", "list", "export"])
@@ -77,6 +89,21 @@ async function main() {
     return
   }
 
+  // --version / -V short-circuit. Runs before any daemon-spawn side effect.
+  if (filtered[0] === "--version" || filtered[0] === "-V") {
+    if (jsonMode) {
+      console.log(JSON.stringify({
+        name: "interceptor",
+        version: VERSION,
+        sha: BUILD_SHA,
+        buildDate: BUILD_DATE,
+      }))
+    } else {
+      console.log(`interceptor ${VERSION} (${BUILD_SHA}, ${BUILD_DATE})`)
+    }
+    return
+  }
+
   // Per-command --help / -h short-circuit. `interceptor open --help` prints
   // the open-specific help block; `interceptor --help` (no command) falls
   // back to the full HELP. Runs before any daemon-spawn side effect.
@@ -91,6 +118,12 @@ async function main() {
   }
 
   const cmd = filtered[0]
+
+  if (!ALL_KNOWN_CMDS.has(cmd)) {
+    console.error(`error: unknown command '${cmd}'. Run 'interceptor help' for usage.`)
+    process.exit(1)
+  }
+
   let needsDaemon = !NO_DAEMON.has(cmd)
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
     needsDaemon = false
@@ -142,7 +175,9 @@ async function main() {
   else if (SCENE_CMDS.has(cmd))   action = await parseSceneCommand(filtered, jsonMode)
   else if (SSE_CMDS.has(cmd))     action = parseSseCommand(filtered)
   else {
-    console.error(`error: unknown command '${cmd}'. Run 'interceptor help' for usage.`)
+    // Unreachable: ALL_KNOWN_CMDS guard above rejects unknown commands
+    // before this dispatch chain runs.
+    console.error(`error: unhandled command '${cmd}'`)
     process.exit(1)
   }
 

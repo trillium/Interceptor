@@ -22,6 +22,10 @@ export function helpForCommand(cmd: string): string | null {
 
 export const HELP = `interceptor — browser control CLI
 
+Flags:
+  -V, --version                       Print version, build SHA, and build date
+  --json                              Output as JSON
+
 Compound (agent-optimized):
   interceptor open <url>                     Open URL, wait, return tree + text
   interceptor open <url> --tree-only         Skip text, return only tree
@@ -210,7 +214,4 @@ Recording (Session Monitor):
 
 Meta:
   interceptor status                         Check daemon status (local — no connection needed)
-  interceptor help                           This help text
-
-Flags:
-  --json                              Output as JSON`
+  interceptor help                           This help text`
