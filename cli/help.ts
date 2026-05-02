@@ -1,3 +1,25 @@
+// Per-command help — extracted from the HELP string below by matching lines
+// that begin with "  interceptor <cmd> ". User types `interceptor <cmd> --help`
+// (or `-h`) and gets exactly the slice for that command.
+export function helpForCommand(cmd: string): string | null {
+  const lines = HELP.split("\n")
+  const matched: string[] = []
+  for (const line of lines) {
+    const m = line.match(/^\s+interceptor\s+(\S+)\b/)
+    if (m && m[1] === cmd) {
+      matched.push(line)
+    }
+  }
+  if (!matched.length) return null
+  return [
+    `interceptor ${cmd} — usage`,
+    "",
+    ...matched,
+    "",
+    `Run 'interceptor help' for the full command list, or 'interceptor ${cmd} -h' is an alias for --help.`,
+  ].join("\n")
+}
+
 export const HELP = `interceptor — browser control CLI
 
 Compound (agent-optimized):

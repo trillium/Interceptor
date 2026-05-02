@@ -7,117 +7,85 @@
  */
 
 import { existsSync, readFileSync } from "node:fs"
-import { IS_WIN, SOCKET_PATH, PID_PATH, transportLabel } from "../../shared/platform"
 import { parseElementTarget } from "../parse"
+import {
+  readStatusSnapshot,
+  detectConfiguredBrowsers,
+  detectMacOSDefaultBrowser,
+  formatStatus,
+  snapshotToJson,
+  type StatusSnapshot,
+} from "../lib/status-renderer"
+import { sendCommand } from "../transport"
 
 type Action = { type: string; [key: string]: unknown }
+
+/**
+ * Best-effort extension-reachability probe (#49). Sends a `tab_list` to the
+ * daemon and reads back. Reachable = the response carries at least one
+ * interceptor-group tab. Probe is skipped silently when the daemon isn't
+ * running, so `status` stays a true local-pre-spawn check by default.
+ */
+async function probeExtensionReachability(): Promise<{ reachable: boolean; reason?: string }> {
+  try {
+    const resp = await Promise.race([
+      sendCommand({ type: "tab_list" }, undefined),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("probe timed out after 2s")), 2000)
+      ),
+    ])
+    const result = resp.result
+    if (!result.success) {
+      return { reachable: false, reason: result.error || "tab_list failed" }
+    }
+    const tabs = (result.data as Array<unknown>) || []
+    if (Array.isArray(tabs) && tabs.length > 0) {
+      return { reachable: true }
+    }
+    return { reachable: false, reason: "no tabs in interceptor group; run 'interceptor open <url>' to verify" }
+  } catch (err) {
+    return { reachable: false, reason: (err as Error).message }
+  }
+}
 
 export async function parseMetaCommand(filtered: string[], jsonMode = false): Promise<Action | null> {
   const cmd = filtered[0]
 
   switch (cmd) {
     case "status": {
-      const statusLines: string[] = []
-      const sockExists = !IS_WIN && existsSync(SOCKET_PATH)
-      let daemonPid: number | null = null
-      let daemonAlive = false
-      let transport = "unknown"
-      if (existsSync(PID_PATH)) {
-        try {
-          const pidContent = readFileSync(PID_PATH, "utf-8").trim()
-          const lines = pidContent.split("\n")
-          daemonPid = parseInt(lines[0])
-          transport = lines[1] || transportLabel()
-          if (!isNaN(daemonPid)) {
-            try { process.kill(daemonPid, 0); daemonAlive = true } catch { daemonAlive = false }
-          }
-        } catch {}
-      }
+      const verbose = filtered.includes("--verbose") || filtered.includes("--explain") || filtered.includes("-v")
+      const snap: StatusSnapshot = readStatusSnapshot()
 
-      // Bridge presence + state — needed for both the bridge: block and the
-      // mode: line below. Mode detection rules:
-      //   • LaunchAgent plist present AND bridge alive  → full
-      //   • LaunchAgent plist present AND bridge not alive → full (mode is the
-      //     install state; "running" is reported separately on the bridge: line)
-      //   • neither present → browser-only
-      //   • bridge alive but no LaunchAgent (manual launch) → unknown
-      const BRIDGE_PID_PATH = "/tmp/interceptor-bridge.pid"
-      const BRIDGE_SOCK_PATH = "/tmp/interceptor-bridge.sock"
-      // The LaunchAgent plist lands in two different places depending on the
-      // install channel. Dev install (scripts/install-bridge.sh) puts it under
-      // the user's $HOME; signed-pkg install (Interceptor-Full-<v>.pkg) puts
-      // it at the system path. Either is sufficient for `mode: full`.
-      const LAUNCH_AGENT_PATH_USER = `${process.env.HOME || ""}/Library/LaunchAgents/com.interceptor.bridge.plist`
-      const LAUNCH_AGENT_PATH_SYSTEM = "/Library/LaunchAgents/com.interceptor.bridge.plist"
-      const launchAgentInstalled = !IS_WIN && (existsSync(LAUNCH_AGENT_PATH_USER) || existsSync(LAUNCH_AGENT_PATH_SYSTEM))
-      const bridgeSockExists = !IS_WIN && existsSync(BRIDGE_SOCK_PATH)
-      let bridgePid: number | null = null
-      let bridgeAlive = false
-      if (existsSync(BRIDGE_PID_PATH)) {
-        try {
-          bridgePid = parseInt(readFileSync(BRIDGE_PID_PATH, "utf-8").trim())
-          if (!isNaN(bridgePid)) {
-            try { process.kill(bridgePid, 0); bridgeAlive = true } catch { bridgeAlive = false }
-          }
-        } catch {}
-      }
-
-      let mode: "browser-only" | "full" | "unknown"
-      if (IS_WIN) {
-        mode = "browser-only"
-      } else if (launchAgentInstalled) {
-        mode = "full"
-      } else if (bridgeAlive) {
-        mode = "unknown"
-      } else {
-        mode = "browser-only"
-      }
-
-      statusLines.push(`mode: ${mode}`)
-      statusLines.push("")
-      statusLines.push(`daemon: ${daemonAlive ? "running" : "not running"}`)
-      if (daemonPid) statusLines.push(`pid: ${daemonPid}`)
-      statusLines.push(`socket: ${sockExists ? SOCKET_PATH : "not found"}`)
-      statusLines.push(`transport: ${transport}`)
-
-      // Only render the bridge: block when in full mode (or unknown — surface
-      // it so the user can investigate). In pure browser-only mode the absence
-      // of the block is informative on its own.
-      if (mode !== "browser-only") {
-        statusLines.push("")
-        statusLines.push(`bridge: ${bridgeAlive ? "running" : "not running"}`)
-        if (bridgePid) statusLines.push(`  pid: ${bridgePid}`)
-        statusLines.push(`  socket: ${bridgeSockExists ? BRIDGE_SOCK_PATH : "not found"}`)
-        if (mode === "unknown") {
-          statusLines.push("  note: bridge is alive but no LaunchAgent plist found at ~/Library/LaunchAgents/com.interceptor.bridge.plist or /Library/LaunchAgents/com.interceptor.bridge.plist.")
-          statusLines.push("        Run 'interceptor upgrade --full' to install the LaunchAgent for persistence.")
-        } else if (!bridgeAlive) {
-          statusLines.push("  hint: LaunchAgent installed but bridge is not running. Try: launchctl kickstart -k gui/$(id -u)/com.interceptor.bridge")
+      // Browser-config block (#52) — verbose-only, macOS-only.
+      if (verbose && process.platform === "darwin") {
+        const configured = detectConfiguredBrowsers()
+        const sysDefault = detectMacOSDefaultBrowser()
+        let matches: boolean | null = null
+        if (sysDefault && configured.length > 0) {
+          matches = configured.some(b => b === sysDefault) || (sysDefault === "chrome" || sysDefault === "brave")
+            ? configured.includes(sysDefault as "chrome" | "brave")
+            : false
         }
-      } else if (!IS_WIN) {
-        statusLines.push("")
-        statusLines.push("To enable native macOS control:    interceptor upgrade --full")
+        snap.browser = {
+          configured,
+          systemDefault: sysDefault,
+          matches,
+        }
       }
 
-      if (!daemonAlive) {
-        statusLines.push("")
-        statusLines.push("hint: run any interceptor command and the daemon will auto-start.")
-        statusLines.push("ensure Chrome/Brave has the Interceptor extension loaded for browser control.")
+      // Extension-reachability probe (#49) — verbose-only, daemon-alive-only.
+      // Stays a true local-pre-spawn check otherwise.
+      if (verbose && snap.daemon) {
+        const probe = await probeExtensionReachability()
+        snap.extension = { probed: true, ...probe }
+      } else if (verbose && !snap.daemon) {
+        snap.extension = { probed: false, reachable: false, reason: "daemon not running" }
       }
+
       if (jsonMode) {
-        console.log(JSON.stringify({
-          mode,
-          daemon: daemonAlive,
-          pid: daemonPid,
-          socket: sockExists ? SOCKET_PATH : null,
-          transport,
-          bridge: bridgeAlive,
-          bridgePid,
-          bridgeSocket: bridgeSockExists ? BRIDGE_SOCK_PATH : null,
-          launchAgentInstalled
-        }, null, 2))
+        console.log(JSON.stringify(snapshotToJson(snap), null, 2))
       } else {
-        console.log(statusLines.join("\n"))
+        console.log(formatStatus(snap, { verbose }))
       }
       return null
     }

@@ -1,4 +1,4 @@
-import { HELP } from "./help"
+import { HELP, helpForCommand } from "./help"
 import { parseTabFlag } from "./parse"
 import { formatState, formatTabs, formatCookies, formatResult } from "./format"
 import { sendCommand, sendCommandWs, type DaemonResult, type DaemonResponse } from "./transport"
@@ -20,6 +20,7 @@ import { runCompoundCommand } from "./commands/compound"
 import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
+import { runInitCommand } from "./commands/init"
 
 // Command → module routing
 const STATE_CMDS = new Set(["state", "tree", "diff", "find", "text", "html"])
@@ -39,9 +40,11 @@ const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
 const UPGRADE_CMDS = new Set(["upgrade"])
+const INIT_CMDS = new Set(["init"])
 
-// Commands that don't require a daemon connection
-const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade"])
+// Commands that don't require a daemon connection (or, in init's case,
+// bootstrap it themselves rather than relying on the pre-dispatch auto-spawn).
+const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "init"])
 
 // Monitor subcommands that are handled locally (no daemon needed)
 const MONITOR_LOCAL_SUBCOMMANDS = new Set(["tail", "list", "export"])
@@ -74,6 +77,19 @@ async function main() {
     return
   }
 
+  // Per-command --help / -h short-circuit. `interceptor open --help` prints
+  // the open-specific help block; `interceptor --help` (no command) falls
+  // back to the full HELP. Runs before any daemon-spawn side effect.
+  if (filtered.includes("--help") || filtered.includes("-h")) {
+    const sub = helpForCommand(filtered[0])
+    if (sub) {
+      console.log(sub)
+    } else {
+      console.log(HELP)
+    }
+    return
+  }
+
   const cmd = filtered[0]
   let needsDaemon = !NO_DAEMON.has(cmd)
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
@@ -94,6 +110,11 @@ async function main() {
 
   if (UPGRADE_CMDS.has(cmd)) {
     await runUpgradeCommand(filtered)
+    return
+  }
+
+  if (INIT_CMDS.has(cmd)) {
+    await runInitCommand(filtered)
     return
   }
 

@@ -38,6 +38,21 @@ async function sendToContentScriptOnce(
   })
 }
 
+// Detect Chrome-restricted origins where chrome.scripting.executeScript will
+// always fail (chrome://, edge://, brave://, the Chrome Web Store, etc.).
+// We surface a fast, actionable error in that case instead of waiting for
+// the upstream timeout and surfacing the raw "Cannot access contents of"
+// message.
+function isChromeRestrictedInjectError(error: string | undefined): boolean {
+  if (!error) return false
+  return (
+    /Cannot access (?:contents of )?(?:url|chrome|edge|brave|webstore)/i.test(error) ||
+    /chrome:\/\/|chrome-untrusted:\/\/|edge:\/\/|brave:\/\//i.test(error) ||
+    /chromewebstore\.google\.com|chrome\.google\.com\/webstore/i.test(error) ||
+    /Extensions cannot be added to/i.test(error)
+  )
+}
+
 export async function sendToContentScript(
   tabId: number,
   action: { type: string; [key: string]: unknown },
@@ -48,9 +63,15 @@ export async function sendToContentScript(
 
   const injected = await injectContentScript(tabId, frameId)
   if (!injected.success) {
+    if (isChromeRestrictedInjectError(injected.error)) {
+      return {
+        success: false,
+        error: `tab ${tabId} has no content script and could not be re-injected (likely a chrome://, edge://, brave://, or Chrome Web Store page). Use 'interceptor open <url>' for a fresh tab.`,
+      }
+    }
     return {
       success: false,
-      error: `content script unavailable on tab ${tabId} and reinjection failed: ${injected.error}`
+      error: `content script unavailable on tab ${tabId} and reinjection failed: ${injected.error}`,
     }
   }
 
@@ -59,7 +80,7 @@ export async function sendToContentScript(
 
   return {
     success: false,
-    error: `content script re-injected on tab ${tabId} but action still failed: ${retried.error || "unknown error"}`
+    error: `content script re-injected on tab ${tabId} but action still failed: ${retried.error || "unknown error"}`,
   }
 }
 
