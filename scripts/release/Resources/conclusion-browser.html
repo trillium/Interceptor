@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Interceptor — Almost Done</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #1d1d1f;
+    margin: 18px 22px;
+    background: #fff;
+  }
+  h2 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 12px 0;
+    color: #1d1d1f;
+  }
+  h3 {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 16px 0 6px 0;
+    color: #1d1d1f;
+  }
+  h4 {
+    font-size: 12px;
+    font-weight: 600;
+    margin: 10px 0 4px 0;
+    color: #1d1d1f;
+  }
+  p { margin: 6px 0; }
+  ol { margin: 4px 0 4px 18px; padding: 0; }
+  ol li { margin: 4px 0; }
+  code, .path {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    background: #f5f5f7;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .path { user-select: all; }
+  pre.cmd {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    background: #f5f5f7;
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin: 4px 0 10px 0;
+    white-space: pre;
+    user-select: all;
+    overflow-x: auto;
+  }
+  .step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    background: #007aff;
+    color: #fff;
+    border-radius: 50%;
+    font-weight: 600;
+    margin-right: 6px;
+    font-size: 11px;
+  }
+  .note {
+    font-size: 12px;
+    color: #6e6e73;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid #e5e5e7;
+  }
+</style>
+</head>
+<body>
+  <h2>Interceptor (Browser-Only) is installed.</h2>
+
+  <h3><span class="step-num">1</span>Load the browser extension</h3>
+  <p>Chrome and Brave do not allow installers to load extensions automatically &mdash; you have to do this once, by hand:</p>
+  <ol>
+    <li>Open <code>chrome://extensions/</code> (or <code>brave://extensions/</code>)</li>
+    <li>Toggle <strong>Developer mode</strong> on (top right)</li>
+    <li>Click <strong>Load unpacked</strong></li>
+    <li>Select this folder:<br>
+      <span class="path">/Library/Application Support/Interceptor/extension</span>
+    </li>
+  </ol>
+
+  <h3><span class="step-num">2</span>Optional: register skill packs with your AI tooling</h3>
+  <p>Interceptor ships skill packs that teach AI agents how to drive the browser surface. Find your runtime below and paste its block into a terminal. Skip the runtimes you don&rsquo;t use. Existing symlinks of the same name are replaced safely; nothing else is touched.</p>
+
+  <h4>Claude Code &mdash; <code>~/.claude/skills</code></h4>
+  <pre class="cmd">mkdir -p ~/.claude/skills
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.claude/skills/interceptor
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.claude/skills/interceptor-browser</pre>
+
+  <h4>Codex &mdash; <code>~/.agents/skills</code></h4>
+  <pre class="cmd">mkdir -p ~/.agents/skills
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.agents/skills/interceptor
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.agents/skills/interceptor-browser</pre>
+
+  <h4>OpenClaw &mdash; <code>~/.openclaw/skills</code></h4>
+  <pre class="cmd">mkdir -p ~/.openclaw/skills
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.openclaw/skills/interceptor
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.openclaw/skills/interceptor-browser</pre>
+
+  <h4>OpenCode &mdash; <code>~/.config/opencode/skills</code></h4>
+  <pre class="cmd">mkdir -p ~/.config/opencode/skills
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.config/opencode/skills/interceptor
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.config/opencode/skills/interceptor-browser</pre>
+
+  <h3>Try it</h3>
+  <p>Open a terminal and run:</p>
+  <p><code>interceptor open "https://example.com"</code></p>
+
+  <p class="note">To uninstall later, run<br>
+    <span class="path">sudo bash "/Library/Application Support/Interceptor/uninstall.sh"</span>
+  </p>
+</body>
+</html>

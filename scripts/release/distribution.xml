@@ -35,7 +35,7 @@
         Brave do not allow installers to do this) and to grant Privacy and
         Security prompts on first macOS command.
     -->
-    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <conclusion file="conclusion-full.html" mime-type="text/html"/>
 
     <choices-outline>
         <line choice="default">

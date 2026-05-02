@@ -188,4 +188,44 @@ describe("release modes — dry-run", () => {
     )
     expect(both).toMatch(/append appcast item \(full, minSysVer 14\.0\)/)
   })
+
+  test("Browser pkg stages the browser-surface skills only", () => {
+    const { stdout, status } = runReleaseDryRun(["--browser-only"])
+    expect(status).toBe(0)
+
+    // Browser daemon staging must include the two browser-surface skills.
+    expect(stdout).toContain(
+      ".agents/skills/interceptor /Volumes",
+    )
+    expect(stdout).toContain(
+      ".agents/skills/interceptor-browser /Volumes",
+    )
+    // It must NOT include the macOS skill — that ships only in Full.
+    expect(stdout).not.toContain(".agents/skills/interceptor-macos")
+  })
+
+  test("Full pkg stages all three skills (browser two + macOS one)", () => {
+    const { stdout, status } = runReleaseDryRun(["--full"])
+    expect(status).toBe(0)
+
+    expect(stdout).toContain(
+      ".agents/skills/interceptor /Volumes",
+    )
+    expect(stdout).toContain(
+      ".agents/skills/interceptor-browser /Volumes",
+    )
+    expect(stdout).toContain(
+      ".agents/skills/interceptor-macos /Volumes",
+    )
+
+    // The macOS skill stages into the daemon-full subtree, not the shared
+    // daemon subtree — so an "expanded" Browser pkg never accidentally ships
+    // it even from the same staging root.
+    const macosLines = stdout
+      .split("\n")
+      .filter((l) => l.includes("interceptor-macos"))
+    expect(
+      macosLines.some((l) => l.includes("/staging/daemon-full/")),
+    ).toBe(true)
+  })
 })

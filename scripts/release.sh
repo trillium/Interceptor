@@ -305,22 +305,34 @@ run chmod 644 "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/README.md"
 # Browser extension: extension/dist → staging/extension/<support>/extension
 run ditto "$REPO_ROOT/extension/dist" "$STAGING_DIR/extension/$DEST_EXTENSION_DIR"
 
+# Skill packs — shipped inside the daemon component payload at
+# /Library/Application Support/Interceptor/skills/<name>/. The conclusion
+# screen tells users to symlink these into the runtime skill dirs they use
+# (~/.claude/skills, ~/.agents/skills, etc.). Browser pkg gets the browser-
+# surface skills only; Full pkg also includes the macOS-surface skill.
+run mkdir -p "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills"
+run ditto "$REPO_ROOT/.agents/skills/interceptor"         "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills/interceptor"
+run ditto "$REPO_ROOT/.agents/skills/interceptor-browser" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills/interceptor-browser"
+
 # Bridge components only when building full mode. The Full daemon component
-# additionally carries the LaunchAgent plist; the Browser daemon component
-# does NOT. We materialize that by ditto-copying staging/daemon → daemon-full
-# and laying down the LaunchAgent plist on top of the copy.
+# additionally carries the LaunchAgent plist + the interceptor-macos skill
+# pack; the Browser daemon component does NOT. We materialize that by ditto-
+# copying staging/daemon → daemon-full and laying down the extra payload on
+# top of the copy.
 if [[ "$BUILD_FULL" == "1" ]]; then
   run mkdir -p "$STAGING_DIR/bridge/$DEST_BRIDGE_DIR"
 
   # Bridge: dist/interceptor-bridge.app → staging/bridge/Applications/interceptor-bridge.app
   run ditto "$REPO_ROOT/dist/interceptor-bridge.app" "$STAGING_DIR/bridge/$DEST_BRIDGE_DIR/interceptor-bridge.app"
 
-  # Full daemon staging tree = browser daemon + LaunchAgent plist
+  # Full daemon staging tree = browser daemon + LaunchAgent plist + macOS skill pack
   run ditto "$STAGING_DIR/daemon" "$STAGING_DIR/daemon-full"
   run mkdir -p "$STAGING_DIR/daemon-full/Library/LaunchAgents"
   run ditto "$REPO_ROOT/scripts/release/com.interceptor.bridge.plist" \
     "$STAGING_DIR/daemon-full/Library/LaunchAgents/com.interceptor.bridge.plist"
   run chmod 644 "$STAGING_DIR/daemon-full/Library/LaunchAgents/com.interceptor.bridge.plist"
+  run ditto "$REPO_ROOT/.agents/skills/interceptor-macos" \
+    "$STAGING_DIR/daemon-full/$DEST_SUPPORT_DIR/skills/interceptor-macos"
 fi
 
 # Per-mode --scripts dirs: exactly one postinstall per mode.

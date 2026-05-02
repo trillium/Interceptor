@@ -30,10 +30,11 @@
 
     <!--
         Post-install screen, picked up by productbuild from the resources dir.
-        Shared with the Full pkg — the same conclusion HTML works because it
-        only documents the manual extension-load step (which both pkgs need).
+        Distinct from the Full pkg's conclusion: this one omits the macOS
+        Privacy & Security step (browser-only mode never triggers TCC) and
+        only lists skill packs that match the browser surface.
     -->
-    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <conclusion file="conclusion-browser.html" mime-type="text/html"/>
 
     <choices-outline>
         <line choice="default">
