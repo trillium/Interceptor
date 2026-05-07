@@ -441,12 +441,22 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     // ── Intelligence ──
     case "ai": {
       const op = filtered[2] || "status"
-      const prompt = filtered[3]
-      return {
-        type: "macos_ai",
-        sub: op,
-        prompt,
+      // PRD-65 Spec 1 follow-up: `ai session <op>` previously sent
+      // filtered[3] as `prompt`, but the bridge's IntelligenceDomain.handleSession
+      // reads action["op"], so the inner op (start/send/history/end) was
+      // dropped and every session call fell through to "session status"
+      // notImplemented. Route filtered[3] to the right field per outer op:
+      //   - sub="prompt"  → filtered[3] is the prompt text
+      //   - sub="session" → filtered[3] is the session sub-op; filtered[4] is the message for session send
+      //   - everything else → leave both unset
+      const action: Action = { type: "macos_ai", sub: op }
+      if (op === "session") {
+        if (filtered[3]) action.op = filtered[3]
+        if (filtered[4]) action.message = filtered[4]
+      } else {
+        if (filtered[3]) action.prompt = filtered[3]
       }
+      return action
     }
 
     // ── Sensitive ──

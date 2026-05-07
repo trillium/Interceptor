@@ -52,7 +52,7 @@ When the user names a specific app ("screenshot of Brave", "scroll Signal", "ope
 
 **When the user explicitly says "bring it forward / show me / switch to"**: respect that. Activate, do the operation, leave it there (or return to previous frontmost if asked).
 
-### Background-First Contract (current as of 0.10.12)
+### Background-First Contract (current as of 0.11.0)
 
 `interceptor macos open` and the synthesized-input verbs (`click`, `type`, `keys`, `drag`) are background-first by default. Foregrounding is opt-in via `--activate` on `open`, or via the explicit `app activate` command.
 
@@ -142,7 +142,7 @@ Every command in this table has been live-verified to leave frontmost untouched.
 5. Audio intelligence: `listen`, `vad`, `sounds`, `audio output/input`.
 6. Vision / NLP / Intelligence: `vision text/faces/hands/bodies`, `nlp entities/language/sentiment/tokens/similar/embed` (all six verbs functional after PRD-63 dispatch fix), `ai status/prompt/session` (functional after PRD-65 dispatch fix), `sensitive check/monitor` (functional after PRD-65 dispatch fix).
 7. Cross-app routing: `intent dispatch --bundle <id> --script <applescript>`, `intent warmup`.
-8. System reads: `notifications tail`, `clipboard read/write/tail`, `files watch`, `fs read/write/search`, `url get/post`, `log query`.
+8. System reads: `notifications tail`, `clipboard read/write/tail`, `files watch`, `fs read/write/search`, `url get/post`, `log query`. Per PRD-65: `fs search --scope <alias-or-absolute-path>` honors `home` / `workspace` / `granted` aliases AND absolute paths (`--scope /tmp`, `--scope /Users/me/Projects`); unresolvable paths return `error: fs_search: scope '...' is not an alias and not an absolute path that exists` instead of silently overriding to home. `log query` runs against `OSLogStore.local()` (system-wide), so `--predicate 'subsystem == "com.apple.WindowServer"'` actually returns entries from other processes.
 9. Overlays: `overlay *` — panic hotkey `Ctrl+Opt+Cmd+Escape` always available.
 10. Recording: `monitor start/stop/tail/export [--plan]`.
 
@@ -241,7 +241,7 @@ If `interceptor macos *` reports `Interceptor bridge not running` or `connection
 ## Safety
 
 - **Panic hotkey** — `Ctrl+Opt+Cmd+Escape` closes every active overlay regardless of owning session. Bridge-side handler.
-- **Sensitive frontmost-app gate** — `mac_type`, `mac_keys`, `mac_click(coords)`, `mac_drag` are rejected when the frontmost app's bundle ID is on the denylist (Keychain, 1Password, Dashlane, LastPass, Bitwarden, System Settings, Chase, Bank of America, Wells Fargo). Extend per environment via `SENSITIVE_BUNDLE_IDS`.
+- **Sensitive frontmost-app gate** — `interceptor macos type`, `interceptor macos keys`, `interceptor macos click <x,y>`, `interceptor macos drag` are rejected when the frontmost app's bundle ID is on the denylist (Keychain, 1Password, Dashlane, LastPass, Bitwarden, System Settings, Chase, Bank of America, Wells Fargo). Extend per environment via `SENSITIVE_BUNDLE_IDS`.
 - **Permission tiers** — Allow (observational): AX reads, app reads, screenshot, vision, NLP, clipboard read, capture, audio, sounds, speech, scroll, overlays. Ask (interactive): click, type, keys, drag, app quit/hide, clipboard write. Deny: none by default.
 - **Stop control** — Active overlays do NOT block session completion. Session shutdown tears down every overlay owned by the session. Engine crash recovery marks orphan overlays `closed_reason=crash`.
 
@@ -273,7 +273,7 @@ interceptor macos value "$REF"                             # confirm landed
 
 ## Pitfalls (what went wrong before, why it's fixed)
 
-Earlier bridge versions had three documented foregrounding leaks. They are all fixed in 0.10.12. If you ever see frontmost change unexpectedly in a future build, suspect one of these classes of bug:
+Earlier bridge versions had three documented foregrounding leaks. They are all fixed as of 0.11.0 (closed by PRD-59 with reinforcement from PRD-62/63/65 retests). If you ever see frontmost change unexpectedly in a future build, suspect one of these classes of bug:
 
 - **`AXEnhancedUserInterface = true` on the app element.** This is the AppKit "VoiceOver is active" flag, not just a Chromium tree-build signal. AppKit apps respond by raising their main window. The bridge now sets only `AXManualAccessibility` (the Chromium-specific signal) in `wakeAXTree`. Never set `AXEnhancedUserInterface` from a background-first reader.
 - **`NSWorkspace.openApplication(at:configuration:)` with `activates = false` against an already-running app.** Per Apple docs the `activates` flag only suppresses the *system's* activation pass; the receiving app still self-activates in response to `kAEOpenApplication` / `kAEOpenDocuments`. The bridge therefore never calls `openApplication` for a running target — the running-app branch is a strict no-op.
