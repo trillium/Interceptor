@@ -824,6 +824,31 @@ interceptor macos windows                        # All windows with frames
 interceptor macos windows --app "Finder"         # Specific app
 interceptor macos move e1 --x 0 --y 25           # Move window
 interceptor macos resize e1 --width 672 --height 983  # Resize window
+interceptor macos move e1 --x 0 --y 25 --app "Finder" # --app/--pid forwarded for ref qualification
+```
+
+`move` and `resize` return a ground-truth geometry payload — the `frame`
+field is read back from AX after the set, NOT echoed from the request.
+When AX clamps the request against `NSScreen.visibleFrame` (e.g. height
+exceeds the available rect after subtracting Dock + menu bar), the
+response sets `clamped: true` and includes `clampedTo` with the legitimate
+ceiling. The bridge runs one internal retry to absorb single-shot drift.
+See PRD-62 for the full contract.
+
+```jsonc
+// resize within visibleFrame
+{
+  "frame":     {"x": 0, "y": 30, "width": 640, "height": 960},
+  "requested": {"width": 640, "height": 960},
+  "clamped":   false
+}
+// resize beyond visibleFrame ceiling
+{
+  "frame":     {"x": 0, "y": 25, "width": 640, "height": 970},
+  "requested": {"width": 640, "height": 1040},
+  "clamped":   true,
+  "clampedTo": {"x": 0, "y": 25, "width": 1920, "height": 970}
+}
 ```
 
 ### Daily-Driver Domain 2: Input (AX-first, PID-routed CGEvent fallback)
@@ -855,12 +880,13 @@ interceptor macos screenshot                     # Frontmost window
 interceptor macos screenshot --app "Finder"      # Specific app (works occluded / minimized / cross-Space)
 interceptor macos screenshot --save              # Save to disk; payload key is `filePath` (not `path`)
 interceptor macos capture start                  # Continuous 30fps capture
-interceptor macos capture frame                  # Get latest frame; blocks ≤3000ms for first frame
+interceptor macos capture status                 # PRD-63: {active, hasFrame, frameAgeMs}
+interceptor macos capture frame                  # PRD-63: returns {dataUrl, bytes, width, height, format} — parity with screenshot
 interceptor macos capture frame --timeout-ms 5000  # Override the wait window for first-frame delivery
 interceptor macos capture stop                   # Stop
 ```
 
-The `--save` response contains `{ "filePath": "...", "format": ..., "bytes": ..., "width": ..., "height": ... }`. Read `filePath` for the path on disk.
+The `--save` response contains `{ "filePath": "...", "format": ..., "bytes": ..., "width": ..., "height": ... }`. Read `filePath` for the path on disk. The `capture frame` response (PRD-63) mirrors the same metadata shape, with `dataUrl` replacing `filePath` for in-memory delivery.
 
 ### Daily-Driver Domain 4: Monitor (Teach and Replay)
 
@@ -937,19 +963,59 @@ interceptor macos sounds status                  # Current detected sounds
 
 #### Vision (on-device)
 
+PRD-63: Vision now derives `SCStreamConfiguration.width`/`height` from the
+filter's `contentRect × pointPixelScale` (Apple's documented capture
+pattern), and `recognizeText` enables `automaticallyDetectsLanguage`,
+`recognitionLanguages = ["en-US"]`, and `usesLanguageCorrection`.
+
 ```bash
 interceptor macos vision faces                   # Detect faces in frontmost window
 interceptor macos vision text                    # OCR
+interceptor macos vision text --app "Notes"      # OCR a specific (possibly occluded) window
 interceptor macos vision hands                   # Hand pose detection
 interceptor macos vision bodies                  # Body pose detection
 ```
 
-#### NLP (on-device)
+#### Apple Intelligence (on-device LLM via FoundationModels — PRD-65)
+
+PRD-65 fixed the dispatch bug that previously made every `ai` verb return
+"not implemented" against fully-built `LanguageModelSession` handlers.
+All three verbs are now functional on macOS 26+; older macOS surfaces a
+structured "FoundationModels requires macOS 26.0+" error.
 
 ```bash
-interceptor macos nlp entities "Ron in Austin"   # Named entity recognition
-interceptor macos nlp sentiment "great product"  # Sentiment analysis
-interceptor macos nlp language "bonjour"         # Language detection
+interceptor macos ai status                  # FoundationModels availability
+interceptor macos ai prompt "Summarize this" # one-shot LanguageModelSession.respond
+interceptor macos ai session start           # multi-turn session begin
+interceptor macos ai session send "Hello"    # turn within active session
+interceptor macos ai session history         # current session transcript
+interceptor macos ai session end             # close session
+```
+
+#### Sensitive content (on-device via SensitiveContentAnalysis — PRD-65)
+
+PRD-65 fixed the same dispatch bug for `sensitive`. The
+`SCSensitivityAnalyzer()` integration was already implemented; only the
+dispatch was broken.
+
+```bash
+interceptor macos sensitive check            # current analysisPolicy state
+interceptor macos sensitive monitor status   # monitor lifecycle
+```
+
+#### NLP (on-device, NaturalLanguage framework)
+
+PRD-63 fixed the dispatch bug that previously made every `nlp` verb return
+"not implemented" against an already-built NaturalLanguage backend. All six
+verbs are functional:
+
+```bash
+interceptor macos nlp entities "Apple was founded in Cupertino"  # NLTagger / .nameType
+interceptor macos nlp sentiment "great product"                  # NLTagger / .sentimentScore
+interceptor macos nlp language "bonjour le monde"                # NLLanguageRecognizer
+interceptor macos nlp tokens "the quick brown fox"               # NLTokenizer
+interceptor macos nlp similar cat dog                            # NLEmbedding.distance
+interceptor macos nlp embed "hello"                              # NLEmbedding.vector
 ```
 
 #### Apple Intelligence (on-device LLM, macOS 26+)

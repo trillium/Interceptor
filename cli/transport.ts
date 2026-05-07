@@ -6,6 +6,29 @@ import { IPC_PORT, IS_WIN, SOCKET_PATH, WS_PORT } from "../shared/platform"
 
 export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT || "15000")
 
+// PRD-63 Spec 5: per-verb timeout overrides. SFSpeechRecognizer's
+// requestAuthorization is async and user-bounded — Apple does not place a
+// time bound on the consent prompt, so 15s is too short for first-time
+// `listen start` / `vad start`. 60s covers the documented user-prompt UX.
+const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+  macos_listen: 60_000,
+  macos_vad: 60_000,
+}
+
+function pickTimeoutForAction(actionType: string): number {
+  return ACTION_TIMEOUT_OVERRIDES_MS[actionType] ?? INTERCEPTOR_TIMEOUT_MS
+}
+
+// PRD-63 Spec 5: branch the timeout hint on `macos_*` so bridge commands
+// don't get a Chrome/Brave-extension troubleshooting hint.
+function timeoutMessage(actionType: string, ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  if (actionType.startsWith("macos_")) {
+    return `timeout: no response for '${actionType}' after ${seconds}s. The macOS bridge may be waiting on a TCC permission prompt (Microphone / Speech Recognition for listen/vad, Screen Recording for screenshot/capture/vision). Check System Settings → Privacy & Security.`
+  }
+  return `timeout: no response for '${actionType}' after ${seconds}s. Ensure Chrome/Brave is open with the Interceptor extension loaded.`
+}
+
 export type Action = { type: string; [key: string]: unknown }
 export type DaemonResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 export type DaemonResponse = {
@@ -22,13 +45,14 @@ export function sendCommand(action: Action, tabId?: number): Promise<DaemonRespo
     let resolved = false
     let socketRef: Bun.Socket<undefined> | null = null
 
+    const timeoutMs = pickTimeoutForAction(action.type)
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
         if (socketRef) try { socketRef.end() } catch {}
-        reject(new Error(`timeout: no response for '${action.type}' after ${INTERCEPTOR_TIMEOUT_MS / 1000}s. Ensure Chrome/Brave is open with the Interceptor extension loaded.`))
+        reject(new Error(timeoutMessage(action.type, timeoutMs)))
       }
-    }, INTERCEPTOR_TIMEOUT_MS)
+    }, timeoutMs)
 
     const socketHandlers: Bun.SocketHandler<undefined> = {
       open(socket: Bun.Socket<undefined>) {
@@ -87,9 +111,10 @@ export function sendCommandWs(action: Action, tabId?: number): Promise<DaemonRes
     const shortId = id.slice(0, 8)
     process.stderr.write(`[${shortId}] →ws ${action.type}\n`)
 
+    const timeoutMs = pickTimeoutForAction(action.type)
     const timer = setTimeout(() => {
-      reject(new Error(`timeout: no response for '${action.type}' after ${INTERCEPTOR_TIMEOUT_MS / 1000}s via WebSocket.`))
-    }, INTERCEPTOR_TIMEOUT_MS)
+      reject(new Error(`timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
+    }, timeoutMs)
 
     const ws = new WebSocket(`ws://localhost:${WS_PORT}`)
     ws.onopen = () => {

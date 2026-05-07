@@ -295,18 +295,30 @@ export function parseMacosCommand(filtered: string[]): Action | null {
 
     case "resize": {
       const ref = filtered[2]
+      if (!ref) { console.error("error: interceptor macos resize requires a ref"); process.exit(1) }
       const width = flagInt(filtered, "--width") || parseInt(filtered[3]) || undefined
       const height = flagInt(filtered, "--height") || parseInt(filtered[4]) || undefined
-      if (!ref) { console.error("error: interceptor macos resize requires a ref"); process.exit(1) }
-      return { type: "macos_resize", ref, width, height }
+      // PRD-62: parser parity with click/type/keys/scroll/drag — forward
+      // --app and --pid so the bridge can use them for ref qualification.
+      const action: Action = { type: "macos_resize", ref, width, height }
+      const resizeApp = flagVal(filtered, "--app")
+      const resizePid = flagInt(filtered, "--pid")
+      if (resizeApp) action.app = resizeApp
+      if (resizePid !== undefined) action.pid = resizePid
+      return action
     }
 
     case "move": {
       const ref = filtered[2]
+      if (!ref) { console.error("error: interceptor macos move requires a ref"); process.exit(1) }
       const x = flagInt(filtered, "--x") || parseInt(filtered[3]) || 0
       const y = flagInt(filtered, "--y") || parseInt(filtered[4]) || 0
-      if (!ref) { console.error("error: interceptor macos move requires a ref"); process.exit(1) }
-      return { type: "macos_move", ref, x, y }
+      const action: Action = { type: "macos_move", ref, x, y }
+      const moveApp = flagVal(filtered, "--app")
+      const movePid = flagInt(filtered, "--pid")
+      if (moveApp) action.app = moveApp
+      if (movePid !== undefined) action.pid = movePid
+      return action
     }
 
     case "drag": {
@@ -399,11 +411,17 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     // ── Vision ──
     case "vision": {
       const op = filtered[2] || "text"
-      return {
+      const action: Action = {
         type: "macos_vision",
         sub: op,
         app: flagVal(filtered, "--app"),
       }
+      // PRD-63 diagnostic: dump the captured image to disk so the operator
+      // can see what Vision actually fed VNRecognizeTextRequest. Off by
+      // default; opt in with --debug-dump <path>.
+      const debugDump = flagVal(filtered, "--debug-dump")
+      if (debugDump) action.debugDumpPath = debugDump
+      return action
     }
 
     // ── NLP ──
@@ -423,12 +441,22 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     // ── Intelligence ──
     case "ai": {
       const op = filtered[2] || "status"
-      const prompt = filtered[3]
-      return {
-        type: "macos_ai",
-        sub: op,
-        prompt,
+      // PRD-65 Spec 1 follow-up: `ai session <op>` previously sent
+      // filtered[3] as `prompt`, but the bridge's IntelligenceDomain.handleSession
+      // reads action["op"], so the inner op (start/send/history/end) was
+      // dropped and every session call fell through to "session status"
+      // notImplemented. Route filtered[3] to the right field per outer op:
+      //   - sub="prompt"  → filtered[3] is the prompt text
+      //   - sub="session" → filtered[3] is the session sub-op; filtered[4] is the message for session send
+      //   - everything else → leave both unset
+      const action: Action = { type: "macos_ai", sub: op }
+      if (op === "session") {
+        if (filtered[3]) action.op = filtered[3]
+        if (filtered[4]) action.message = filtered[4]
+      } else {
+        if (filtered[3]) action.prompt = filtered[3]
       }
+      return action
     }
 
     // ── Sensitive ──
@@ -502,8 +530,16 @@ export function parseMacosCommand(filtered: string[]): Action | null {
 
     // ── Audio ──
     case "audio": {
-      const channel = filtered[2] || "output"
-      const op = filtered[3] || "start"
+      // PRD-65 Spec 5 / PRD-64 Spec 5: bare `interceptor macos audio`
+      // previously defaulted to channel="output" + op="start" — silently
+      // starting capture as a side effect of asking for help. Require both
+      // explicitly so the no-arg invocation prints usage instead.
+      const channel = filtered[2]
+      const op = filtered[3]
+      if (!channel || !op) {
+        console.error("error: interceptor macos audio requires <channel> <op>. Channels: output | input | both. Ops: start | stop | level | devices.")
+        process.exit(1)
+      }
       return {
         type: "macos_audio",
         sub: channel,
@@ -810,8 +846,17 @@ export function parseMacosCommand(filtered: string[]): Action | null {
           const sceneScript = flagVal(filtered, "--scene-script")
           const url = flagVal(filtered, "--url")
           const htmlB64 = flagVal(filtered, "--html-b64")
+          // PRD-65 Spec 7: --html accepted as a friendlier alias to
+          // --html-b64; the parser b64-encodes inline HTML so callers
+          // don't have to wrap shell-escaped HTML themselves.
+          const htmlInline = flagVal(filtered, "--html")
           const rect = flagVal(filtered, "--rect")
           const timeout = flagInt(filtered, "--timeout-seconds")
+          // PRD-65 Spec 7: --duration / --duration-ms aliases for the
+          // existing --timeout-seconds. The bridge auto-dismisses after
+          // the timeout regardless of mode.
+          const durationMs = flagInt(filtered, "--duration-ms")
+          const durationLegacy = flagInt(filtered, "--duration")
           const density = flagInt(filtered, "--density")
           const lifetime = flagInt(filtered, "--lifetime")
           const anchor = flagVal(filtered, "--anchor")
@@ -832,6 +877,29 @@ export function parseMacosCommand(filtered: string[]): Action | null {
           if (sceneScript) action.scene_script = sceneScript
           if (url) action.url = url
           if (htmlB64) action.html_b64 = htmlB64
+          // PRD-65 Spec 7: forward inline --html as html_b64 (b64-encoded)
+          // so the bridge has a single source HTML field. Buffer.from is
+          // already imported into Bun's globals.
+          let resolvedHtmlB64: string | undefined = htmlB64
+          if (!resolvedHtmlB64 && htmlInline) {
+            resolvedHtmlB64 = Buffer.from(htmlInline, "utf-8").toString("base64")
+            action.html_b64 = resolvedHtmlB64
+          }
+
+          // PRD-65 Spec 7: unify --duration-ms / --duration / --timeout-seconds
+          // into the bridge's single `timeout_seconds` action field
+          // (OverlayDomain only reads timeout_seconds today, see
+          // OverlayDomain.swift:114). --duration-ms wins, then --duration
+          // (interpreted as ms for ergonomic parity with the particles-mode
+          // flag the live tests already used), then --timeout-seconds as
+          // the legacy form.
+          if (durationMs !== undefined) {
+            action.timeout_seconds = durationMs / 1000
+          } else if (durationLegacy !== undefined) {
+            action.timeout_seconds = durationLegacy / 1000
+          } else if (timeout !== undefined) {
+            action.timeout_seconds = timeout
+          }
 
           if (rect) {
             const [x, y, w, h] = rect.split(",").map((v) => parseFloat(v))
@@ -840,8 +908,8 @@ export function parseMacosCommand(filtered: string[]): Action | null {
             }
           }
 
-          if (!particles && !scene && !sceneScript && !url && !htmlB64) {
-            console.error("error: overlay start requires one of --particles, --scene, --scene-script, --url, --html-b64")
+          if (!particles && !scene && !sceneScript && !url && !resolvedHtmlB64) {
+            console.error("error: overlay start requires one of --particles, --scene, --scene-script, --url, --html, --html-b64")
             process.exit(1)
           }
           return action

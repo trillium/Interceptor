@@ -17,6 +17,11 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
     private var activeOutput: CaptureStreamOutput?
     private var activeDelegate: CaptureStreamDelegateLogger?
     private var latestFrame: Data?
+    // PRD-63 Spec 3+4: track per-frame metadata so `capture status` can
+    // report frame age, and `capture frame` can return bytes/width/height
+    // matching ScreenshotDomain's payload shape.
+    private var latestFrameSize: CGSize?
+    private var latestFrameTimestamp: Date?
     private let lock = NSLock()
     // Signaled by CaptureStreamOutput.onFrame each time a sample buffer
     // arrives. handleCapture("frame", ...) waits on this so callers don't
@@ -35,15 +40,31 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
     // Test-only injectors mirroring what CaptureStreamOutput would do
     // when ScreenCaptureKit delivers a real sample buffer.
     func _testInjectFrame(_ data: Data) {
-        lock.withLock { latestFrame = data }
+        lock.withLock {
+            latestFrame = data
+            latestFrameSize = Self.decodeJPEGSize(data)
+            latestFrameTimestamp = Date()
+        }
         frameReady.signal()
     }
     func _testReset() {
         lock.withLock {
             latestFrame = nil
+            latestFrameSize = nil
+            latestFrameTimestamp = nil
             testForcedActive = false
         }
         while frameReady.wait(timeout: .now()) == .success {}
+    }
+
+    /// PRD-63 Spec 4: decode JPEG dimensions without paying for full pixel
+    /// decode. CGImageSource reads the SOI/SOF headers only.
+    static func decodeJPEGSize(_ data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        return CGSize(width: CGFloat(w), height: CGFloat(h))
     }
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -333,6 +354,22 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
             startContinuousCapture(action, completion: completion)
         case "frame":
             handleFrame(action, completion: completion)
+        case "status":
+            // PRD-63 Spec 3: ground-truth state of the continuous-capture
+            // pipeline. `active` reflects whether SCStream is registered;
+            // `hasFrame` whether the cache holds a sample buffer; and
+            // `frameAgeMs` how stale the cached frame is (omitted when
+            // hasFrame == false).
+            lock.lock()
+            let active = (activeStream != nil) || testForcedActive
+            let hasFrame = latestFrame != nil
+            let ts = latestFrameTimestamp
+            lock.unlock()
+            var payload: [String: Any] = ["active": active, "hasFrame": hasFrame]
+            if let ts = ts {
+                payload["frameAgeMs"] = Int(Date().timeIntervalSince(ts) * 1000)
+            }
+            completion(WireFormat.success(payload))
         case "stop":
             lock.lock()
             activeStream?.stopCapture()
@@ -340,6 +377,8 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
             activeOutput = nil
             activeDelegate = nil
             latestFrame = nil
+            latestFrameSize = nil
+            latestFrameTimestamp = nil
             lock.unlock()
             completion(WireFormat.success("capture stopped"))
         default:
@@ -361,10 +400,11 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
         lock.lock()
         let streamActive = (activeStream != nil) || testForcedActive
         let bufferedFrame = latestFrame
+        let bufferedSize = latestFrameSize
         lock.unlock()
 
         if let frame = bufferedFrame {
-            completion(WireFormat.success(["dataUrl": "data:image/jpeg;base64,\(frame.base64EncodedString())"]))
+            completion(WireFormat.success(Self.buildFramePayload(frame: frame, size: bufferedSize)))
             return
         }
 
@@ -385,15 +425,30 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
             let result = self.frameReady.wait(timeout: .now() + .milliseconds(timeoutMs))
             self.lock.lock()
             let nextFrame = self.latestFrame
+            let nextSize = self.latestFrameSize
             self.lock.unlock()
             if let nextFrame = nextFrame {
-                completion(WireFormat.success(["dataUrl": "data:image/jpeg;base64,\(nextFrame.base64EncodedString())"]))
+                completion(WireFormat.success(Self.buildFramePayload(frame: nextFrame, size: nextSize)))
             } else if result == .timedOut {
                 completion(WireFormat.error("capture stream active but no frame in \(timeoutMs)ms — increase --timeout-ms or use screenshot instead"))
             } else {
                 completion(WireFormat.error("capture stream active but no frame buffered"))
             }
         }
+    }
+
+    /// PRD-63 Spec 4: produce the metadata-rich frame payload that mirrors
+    /// ScreenshotDomain's shape (`bytes`/`width`/`height`/`format`/`dataUrl`).
+    /// Falls back to JPEG-header decode if a precomputed size isn't cached.
+    static func buildFramePayload(frame: Data, size: CGSize?) -> [String: Any] {
+        let resolvedSize = size ?? Self.decodeJPEGSize(frame) ?? .zero
+        return [
+            "dataUrl": "data:image/jpeg;base64,\(frame.base64EncodedString())",
+            "bytes":   frame.count,
+            "width":   Int(resolvedSize.width),
+            "height":  Int(resolvedSize.height),
+            "format":  "jpeg"
+        ]
     }
 
     private func startContinuousCapture(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -404,7 +459,11 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
         // unavailable from async contexts under Swift strict concurrency.
         // Also clear any stale frame buffer.
         while frameReady.wait(timeout: .now()) == .success {}
-        lock.withLock { latestFrame = nil }
+        lock.withLock {
+            latestFrame = nil
+            latestFrameSize = nil
+            latestFrameTimestamp = nil
+        }
 
         Task {
             do {
@@ -457,6 +516,12 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
                     self.lock.withLock {
                         if self.activeStream != nil {
                             self.latestFrame = data
+                            // PRD-63 Spec 3+4: cache the frame's pixel
+                            // dimensions and ingest timestamp so handleFrame
+                            // can return them in the metadata payload, and
+                            // handleCapture("status") can report frame age.
+                            self.latestFrameSize = Self.decodeJPEGSize(data)
+                            self.latestFrameTimestamp = Date()
                         }
                     }
                     self.frameReady.signal()

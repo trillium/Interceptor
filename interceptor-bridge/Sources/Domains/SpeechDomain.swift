@@ -38,7 +38,10 @@ final class SpeechDomain: DomainHandler, @unchecked Sendable {
             let t = transcript
             let listening = isListening
             lock.unlock()
-            completion(WireFormat.success(["transcript": t, "listening": listening, "streaming": true]))
+            // PRD-63 Spec 6: drop the always-true `streaming` field. The
+            // operational state lives in `listening`; a hard-coded `true`
+            // alongside it is contradictory when listening==false.
+            completion(WireFormat.success(["transcript": t, "listening": listening]))
         case "vocab":
             handleVocab(action, completion: completion)
         case "vad":

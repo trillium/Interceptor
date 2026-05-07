@@ -28,7 +28,10 @@ final class SoundDomain: DomainHandler, @unchecked Sendable {
             let classifications = recentClassifications
             let active = isClassifying
             lock.unlock()
-            completion(WireFormat.success(["classifying": active, "classifications": classifications, "streaming": true]))
+            // PRD-63 Spec 6: drop the always-true `streaming` field. The
+            // operational state lives in `classifying`; a hard-coded `true`
+            // alongside it is contradictory when classifying==false.
+            completion(WireFormat.success(["classifying": active, "classifications": classifications]))
         case "log":
             let filter = action["filter"] as? String
             lock.lock()

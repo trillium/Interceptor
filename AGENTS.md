@@ -4,6 +4,18 @@ Interceptor is an AI-agent control surface for the user's real browser and nativ
 
 For user-facing overview material, see [README.md](README.md). For implementation details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Behavior Contracts (read first)
+
+Five PRDs define the live behavior contracts you'll see across the macOS surface. Skim them when an agent's expected behavior diverges from observation:
+
+| PRD | What it locks in | Quick test |
+|---|---|---|
+| `prd/PRD-58.md` | Compound `inspect` parser collision fixed; bare `inspect` is reachable | `interceptor macos inspect --app TextEdit` returns a tree |
+| `prd/PRD-59.md` | **Background-first contract.** Only two commands move focus: `app activate <app>` and `open <app> --activate`. Everything else stays invisible | Run any command; `interceptor macos frontmost` should be unchanged |
+| `prd/PRD-62.md` | `resize` / `move` return `{frame, requested, clamped, clampedTo}` ground-truth shape via post-set `getFrame()` readback. Internal verify-and-retry capped at 2 attempts. CLI parser forwards `--app`/`--pid` for parity with click/type/keys/scroll/drag | `interceptor macos resize <ref> --width 640 --height 960` returns the response shape above |
+| `prd/PRD-63.md` | Phase-5 multimodal closure: NLP/Vision/Capture dispatch via `action["sub"]`, capture status verb, capture frame metadata parity, listen/vad/sounds tail no spurious `streaming`, transport timeout messages branch on `macos_*` | `interceptor macos nlp entities "Apple in Cupertino"` returns structured array |
+| `prd/PRD-65.md` | Phase-6+7 closure: AI/Sensitive dispatch fix, stream list verb, fs absolute-path scope, audio device enumeration via `AVCaptureDevice.DiscoverySession`, `OSLogStore.local()` for log queries, container `setup_required` field, overlay `--html` + `--duration` aliases | `interceptor macos ai status` returns FoundationModels payload; `fs search --scope /tmp` honors the path |
+
 ## Install Modes
 
 Interceptor ships in two install modes. Check yours with `interceptor status` and read the `mode:` line:
@@ -48,21 +60,22 @@ When the target is a specific app, prefer staying invisible to the user. The use
 
 | Operation | Background path (preferred) | When you must escalate |
 |---|---|---|
-| Screenshot of an app's window | `mac_screenshot --app "X"` (CGS path captures occluded / minimized / cross-Space) | `--mode display` only when the user wants the whole screen |
-| List / read a Chrome / Brave tab | Apple Events: `mac_intent dispatch --bundle <id> --script 'tell ... get URL of active tab'` | Only if AppleScript is disabled in the target app |
-| Open a URL in a specific browser | Apple Events: `mac_intent dispatch --bundle com.brave.Browser --script 'open location "https://…"'` (no `activate`) | Only if the user explicitly asks for the browser to come forward |
-| Read a backgrounded Electron app's UI | `mac_tree --app "X"` (auto-fires `AXManualAccessibility` wake-up) | App that gates AX on visibility (Signal): brief-raise + restore focus |
-| Scroll a backgrounded app | `mac_scroll <dir> <amount> --app "X"` (routes via `postToPid`) | Chromium-occluded apps that pause their event loop: brief-raise |
-| Drive a native Cocoa app | AX `mac_act/click/type` against the target's PID without `activate` | OS-level `--os` modifier only if synthetic input fails |
-| Read text / selection from another app | `mac_text` against the target — no focus change | (no escalation needed) |
+| Screenshot of an app's window | `interceptor macos screenshot --app "X"` (CGS path captures occluded / minimized / cross-Space) | `--mode display` only when the user wants the whole screen |
+| List / read a Chrome / Brave tab | Apple Events: `interceptor macos intent dispatch --bundle <id> --script 'tell ... get URL of active tab'` | Only if AppleScript is disabled in the target app |
+| Open a URL in a specific browser | Apple Events: `interceptor macos intent dispatch --bundle com.brave.Browser --script 'open location "https://…"'` (no `activate`) | Only if the user explicitly asks for the browser to come forward |
+| Read a backgrounded Electron app's UI | `interceptor macos tree --app "X"` (auto-fires `AXManualAccessibility` wake-up) | App that gates AX on visibility (Signal): brief-raise + restore focus |
+| Scroll a backgrounded app | `interceptor macos scroll <dir> <amount> --app "X"` (routes via `postToPid`) | Chromium-occluded apps that pause their event loop: brief-raise |
+| Drive a native Cocoa app | AX `interceptor macos act/click/type` against the target's PID without `activate` | OS-level `--os` modifier only if synthetic input fails |
+| Read text / selection from another app | `interceptor macos text` against the target — no focus change | (no escalation needed) |
+| Move / resize a window in the background | `interceptor macos move/resize <ref> --app "X"` returns `{frame, requested, clamped, clampedTo}` ground-truth shape (PRD-62) | (no escalation needed; refs churn after geometry — refresh from `windows`) |
 
 **Reflexes to drop:**
-- Do NOT call `mac_app activate` before screenshotting or reading. SCK + CGS work on offscreen windows.
+- Do NOT call `interceptor macos app activate` before screenshotting or reading. SCK + CGS work on offscreen windows.
 - Do NOT add `activate` to AppleScript blocks unless the user asked the app to come forward.
 - Do NOT bring a window forward "to be safe" — the bridge's CGS / AX paths are designed to work without it.
 - Do NOT use `--mode display` for app-specific captures — it captures the visible composite (which has the wrong app on top).
 
-**When the user explicitly says "bring it forward" / "show me X" / "switch to X":** respect that. Use `mac_app activate "X"` once, do the operation, and unless the user asked you to leave it there, restore the previous frontmost via `_SLPSSetFrontProcessWithOptions` (TODO: surface as `mac_app activate-and-restore`).
+**When the user explicitly says "bring it forward" / "show me X" / "switch to X":** respect that. Use `interceptor macos app activate "X"` once, do the operation, and — unless the user asked you to leave it there — restore the previous frontmost by capturing the current frontmost (`interceptor macos frontmost`) before activating, then `interceptor macos app activate <previous>` after the work completes.
 
 ## Browser Extension vs macOS Bridge
 

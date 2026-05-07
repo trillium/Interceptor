@@ -9,7 +9,15 @@ final class IntelligenceDomain: DomainHandler, @unchecked Sendable {
     private var sessionHistory: [[String: String]] = []
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
-        switch command {
+        // PRD-65 Spec 1 / PRD-64 Spec 1: IntelligenceDomain previously
+        // switched on `command`, which the Router collapses to "ai" for
+        // two-segment action types. The CLI parser passes the verb in
+        // action["sub"], matching every peer domain (Speech, Sound, Vision,
+        // Capture, NLP after PRD-63). Same dispatch shape now reaches
+        // checkStatus / runPrompt / handleSession instead of falling through
+        // to notImplemented.
+        let sub = action["sub"] as? String ?? command
+        switch sub {
         case "status":
             checkStatus(completion: completion)
         case "prompt":
@@ -17,7 +25,7 @@ final class IntelligenceDomain: DomainHandler, @unchecked Sendable {
         case "session":
             handleSession(action, completion: completion)
         default:
-            notImplemented(command, completion: completion)
+            notImplemented(sub, completion: completion)
         }
     }
 

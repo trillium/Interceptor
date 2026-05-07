@@ -226,9 +226,14 @@ The daemon talks to the extension via three channels, routed by [`daemon/outboun
 - AVFoundation + speech + sound classification (`SpeechDomain`, `SoundDomain`, `AudioDomain`)
 - Vision + NLP + on-device LLM (`VisionDomain`, `NLPDomain`, `IntelligenceDomain`)
 - File watch / notifications / clipboard (`FilesDomain`, `NotificationsDomain`, `ClipboardDomain`)
+- Sensitive content + log query + container + URL fetch (`SensitiveDomain`, `LogDomain`, `ContainerDomain`, `NetDomain`)
 - Native macOS monitor (`MonitorDomain`) — same JSON event schema as browser monitor
 
 Communication: CLI / daemon → Unix socket (`/tmp/interceptor-bridge.sock`) → bridge router → domain handler → CGEvent / AX / etc.
+
+#### Dispatch invariant — read `action["sub"]`, not `command`
+
+The Router collapses an action `type` like `macos_nlp` into `command="nlp"` for two-segment types (see `Router.swift:43-55`). The CLI parser puts the actual verb in `action["sub"]`. **Every domain handler MUST read `let sub = action["sub"] as? String ?? command` and switch on `sub`.** Switching on `command` directly is a bug — every verb falls through to `default → notImplemented` even when handlers exist (PRD-63 fixed this for NLP, PRD-65 fixed it for AI and Sensitive). Keep this invariant when adding new domains.
 
 For screenshot saving, `interceptor-bridge/Sources/Domains/CaptureDomain.swift` no longer relies on `FileManager.default.currentDirectoryPath` when running under `launchd`. The CLI passes its working directory (`cli/commands/macos.ts`), and the bridge falls back through Downloads, home, then temp so `interceptor macos screenshot --save` works cleanly under LaunchAgent execution.
 
@@ -291,3 +296,18 @@ Recent major additions reflected in this document:
 - transport hardening around disconnected native ports
 - strict-CSP `eval --main` fallback via tab-scoped CSP stripping and retry
 - launchd-safe macOS screenshot saving
+
+---
+
+## PRD Index
+
+The `prd/` directory is gitignored (working docs), but the PRDs that shape current bridge behavior are referenced repeatedly across this file and the agent skills. When you need the full evidence for a behavior contract, look up the PRD in your local copy:
+
+| PRD | Contract |
+|---|---|
+| `prd/PRD-58.md` | Compound `inspect` parser collision fixed; bare `inspect` is reachable |
+| `prd/PRD-59.md` | Background-first contract — only `app activate` and `open --activate` move focus |
+| `prd/PRD-62.md` | `resize`/`move` ground-truth response shape (`{frame, requested, clamped, clampedTo}`); internal verify-and-retry; CLI parser parity for `--app`/`--pid` |
+| `prd/PRD-63.md` | Phase-5 multimodal closure: NLP/Vision/Capture dispatch, capture status verb, capture frame metadata parity, listen/vad/sounds tail field cleanup, transport timeout messaging |
+| `prd/PRD-64.md` | Planning doc for the Phase-6+7 defects (Apple-doc-grounded, evidence-of-record) |
+| `prd/PRD-65.md` | Phase-6+7 closure: AI/Sensitive dispatch, stream list verb, fs absolute-path scope, audio device enumeration via `AVCaptureDevice.DiscoverySession`, `OSLogStore.local()`, container `setup_required` field, overlay `--html` + `--duration` aliases |

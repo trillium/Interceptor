@@ -5,13 +5,19 @@ final class SensitiveDomain: DomainHandler, @unchecked Sendable {
     private var monitorActive = false
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
-        switch command {
+        // PRD-65 Spec 2 / PRD-64 Spec 2: SensitiveDomain mirrored the
+        // pre-PRD-63 NLP dispatch bug — switched on `command` ("sensitive")
+        // not action["sub"]. The SCSensitivityAnalyzer integration at
+        // checkContent already follows Apple's documented API; only the
+        // dispatch was broken.
+        let sub = action["sub"] as? String ?? command
+        switch sub {
         case "check":
             checkContent(action, completion: completion)
         case "monitor":
             handleMonitor(action, completion: completion)
         default:
-            notImplemented(command, completion: completion)
+            notImplemented(sub, completion: completion)
         }
     }
 

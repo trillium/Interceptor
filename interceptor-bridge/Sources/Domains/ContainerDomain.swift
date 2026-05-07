@@ -193,7 +193,7 @@ final class ContainerDomain: DomainHandler, @unchecked Sendable {
             let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
 
             if completionFired.set() {
-                completion(WireFormat.success([
+                var payload: [String: Any] = [
                     "exitCode": finishedTask.terminationStatus,
                     "stdout": stdout,
                     "stderr": stderr,
@@ -201,7 +201,20 @@ final class ContainerDomain: DomainHandler, @unchecked Sendable {
                     "image": image,
                     "command": command,
                     "network": network
-                ]))
+                ]
+                // PRD-65 Spec 9 / PRD-64 Spec 9: when the container daemon
+                // isn't running, surface the recovery as a structured
+                // setup_required field so callers don't have to scrape
+                // stderr to learn what to do.
+                if stderr.contains("container system service has not been started")
+                    || stderr.contains("XPC connection error: Connection invalid") {
+                    payload["setup_required"] = [
+                        "reason": "container daemon is not running",
+                        "command": "container system start",
+                        "docs": "https://developer.apple.com/documentation/virtualization"
+                    ]
+                }
+                completion(WireFormat.success(payload))
             }
         }
 

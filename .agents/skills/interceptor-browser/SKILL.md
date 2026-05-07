@@ -96,6 +96,10 @@ See `references/monitor-and-replay.md` for monitor session behavior, replay-plan
 - Use `eval --main` only when the built-in command surface doesn't expose what you need. The dispatched-event pattern (with `__interceptor_trust` marker) is often the narrowest viable path for canvas-rendered surfaces.
 - Avoid `interceptor network on` unless raw CDP interception is explicitly needed. Passive capture already sees fetch / XHR / EventSource traffic using only standard Web APIs, without attaching the DevTools protocol. WebSocket frames need a MAIN-world `WebSocket` patch (see canvas-rendered notes), not CDP.
 
+## Cross-Surface Note (Background-First)
+
+PRD-59's background-first contract is **macOS-only** — the Browser surface doesn't have a frontmost-app concept that agents need to preserve. `interceptor open <url>`, `read`, `act`, `inspect`, etc. operate inside the user's existing browser session and never raise other apps. If a workflow involves both surfaces (e.g. open a URL in a backgrounded Brave) the macOS half runs through the `interceptor-macos` skill and inherits PRD-59 there.
+
 ## When To Switch Surfaces
 
 If the target is **outside the page** — a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any other macOS app — load `interceptor-macos` instead. The Browser surface cannot see anything outside the page.

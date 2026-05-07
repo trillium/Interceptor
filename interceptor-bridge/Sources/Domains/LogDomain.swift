@@ -28,7 +28,16 @@ final class LogDomain: DomainHandler, @unchecked Sendable {
         #if canImport(OSLog)
         if #available(macOS 12.0, *) {
             do {
-                let store = try OSLogStore(scope: .currentProcessIdentifier)
+                // PRD-65 Spec 8 / PRD-64 Spec 8: OSLogStore.Scope
+                // .currentProcessIdentifier returns ONLY entries from this
+                // bridge process — by definition cannot return entries
+                // from com.apple.WindowServer or any other subsystem the
+                // caller queries. Apple documents OSLogStore.local() as
+                // the system-wide alternative
+                // (OSLog/OSLogStore.md:25-26). Switch to .local() so the
+                // documented predicate-based queries against arbitrary
+                // subsystems actually return entries.
+                let store = try OSLogStore.local()
                 let position: OSLogPosition
                 if let s = sinceStr {
                     let f = ISO8601DateFormatter()
@@ -70,7 +79,7 @@ final class LogDomain: DomainHandler, @unchecked Sendable {
                     }
                     if out.count >= limit { break }
                 }
-                completion(WireFormat.success(["entries": out, "count": out.count]))
+                completion(WireFormat.success(["entries": out, "count": out.count, "scope": "local"]))
                 return
             } catch {
                 completion(WireFormat.error("log_query failed: \(error.localizedDescription)"))

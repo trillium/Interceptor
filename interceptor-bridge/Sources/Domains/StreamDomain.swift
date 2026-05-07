@@ -32,6 +32,11 @@ final class StreamDomain: DomainHandler, @unchecked Sendable {
             stopStream(action, completion: completion)
         case "status":
             streamStatus(completion: completion)
+        case "list":
+            // PRD-65 Spec 3 / PRD-64 Spec 3: project the sessions dict so
+            // callers can enumerate active streams. The dict already holds
+            // per-session metadata; this verb just shapes it for the wire.
+            listStreams(completion: completion)
         case "frame":
             getFrame(action, completion: completion)
         case "fps":
@@ -45,6 +50,28 @@ final class StreamDomain: DomainHandler, @unchecked Sendable {
         default:
             notImplemented(op, completion: completion)
         }
+    }
+
+    private func listStreams(completion: @escaping @Sendable ([String: Any]) -> Void) {
+        let snapshot: [[String: Any]] = sessionsQueue.sync {
+            sessions.map { (sid, session) in
+                var entry: [String: Any] = [
+                    "sid": sid,
+                    "frameCount": session.frameCount,
+                    "currentFPS": session.currentFPS,
+                    "width": session.lastWidth,
+                    "height": session.lastHeight,
+                    "recording": session.recording
+                ]
+                if let started = session.startTime {
+                    let f = ISO8601DateFormatter()
+                    f.formatOptions = [.withInternetDateTime]
+                    entry["startedAt"] = f.string(from: started)
+                }
+                return entry
+            }
+        }
+        completion(WireFormat.success(snapshot))
     }
 
     private func startStream(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {

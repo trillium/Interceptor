@@ -3,7 +3,14 @@ import NaturalLanguage
 
 final class NLPDomain: DomainHandler, @unchecked Sendable {
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
-        switch command {
+        // PRD-63 Spec 1: NLPDomain previously switched on `command`, which the
+        // Router collapses to the domain prefix ("nlp") for two-segment action
+        // types. The CLI parser passes the verb in action["sub"], so every
+        // peer domain (Speech, Sound, Vision, Capture) reads sub. NLP was the
+        // sole outlier — every verb fell through to notImplemented despite a
+        // complete NaturalLanguage-backed implementation below.
+        let sub = action["sub"] as? String ?? command
+        switch sub {
         case "entities":
             extractEntities(action, completion: completion)
         case "language":
@@ -17,7 +24,7 @@ final class NLPDomain: DomainHandler, @unchecked Sendable {
         case "embed":
             getEmbedding(action, completion: completion)
         default:
-            notImplemented(command, completion: completion)
+            notImplemented(sub, completion: completion)
         }
     }
 

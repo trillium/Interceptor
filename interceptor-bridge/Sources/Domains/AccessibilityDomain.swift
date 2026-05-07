@@ -413,6 +413,12 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         completion(WireFormat.success(result))
     }
 
+    // PRD-62: ground-truth geometry — handleResize and handleMove now read
+    // post-set kAXSize / kAXPosition back via getFrame() instead of echoing
+    // the input dict, expose NSScreen.visibleFrame as `clampedTo` whenever
+    // the system clamped the request, and run a single internal retry to
+    // absorb single-shot drift caused by non-atomic AX position+size sets.
+
     private func handleResize(action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         guard let ref = action["ref"] as? String,
               let element = refRegistry.resolve(ref) else {
@@ -423,17 +429,41 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             completion(WireFormat.error("resize requires width and height"))
             return
         }
-        var size = CGSize(width: CGFloat(w), height: CGFloat(h))
-        guard let axSize = AXValueCreate(.cgSize, &size) else {
-            completion(WireFormat.error("failed to create AXValue for size"))
+
+        // Spec 3: pre-flight settability per AXUIElementIsAttributeSettable.
+        if let unsettable = settabilityError(element: element, attribute: kAXSizeAttribute as CFString, verb: "resize") {
+            completion(unsettable)
             return
         }
-        let result = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, axSize)
-        if result == .success {
-            completion(WireFormat.success(["width": w, "height": h]))
-        } else {
-            completion(WireFormat.error("resize failed: \(result.rawValue)"))
+
+        let target = CGSize(width: CGFloat(w), height: CGFloat(h))
+        if let setError = setSize(element, target) {
+            completion(WireFormat.error("resize failed: \(setError.rawValue)"))
+            return
         }
+
+        // Spec 2: verify, and if drifted within visibleFrame, retry exactly once.
+        var frame = getFrame(element)
+        if let f = frame, !Self.sizeMatches(f.size, target) {
+            if let visible = visibleFrameRectForElement(element),
+               target.width <= visible.width && target.height <= visible.height {
+                _ = setSize(element, target)
+                frame = getFrame(element)
+            }
+        }
+
+        guard let finalFrame = frame else {
+            completion(WireFormat.error("resize set succeeded but post-set frame read failed"))
+            return
+        }
+        let response = Self.buildGeometryResponse(
+            frame: finalFrame,
+            requested: ["width": w, "height": h],
+            targetSize: target,
+            targetOrigin: nil,
+            visibleFrame: visibleFrameRectForElement(element)
+        )
+        completion(WireFormat.success(response))
     }
 
     private func handleMove(action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -446,17 +476,142 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             completion(WireFormat.error("move requires x and y"))
             return
         }
-        var point = CGPoint(x: CGFloat(x), y: CGFloat(y))
-        guard let axPoint = AXValueCreate(.cgPoint, &point) else {
-            completion(WireFormat.error("failed to create AXValue for point"))
+
+        if let unsettable = settabilityError(element: element, attribute: kAXPositionAttribute as CFString, verb: "move") {
+            completion(unsettable)
             return
         }
-        let result = AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, axPoint)
-        if result == .success {
-            completion(WireFormat.success(["x": x, "y": y]))
-        } else {
-            completion(WireFormat.error("move failed: \(result.rawValue)"))
+
+        let target = CGPoint(x: CGFloat(x), y: CGFloat(y))
+        if let setError = setPosition(element, target) {
+            completion(WireFormat.error("move failed: \(setError.rawValue)"))
+            return
         }
+
+        var frame = getFrame(element)
+        if let f = frame, !Self.originMatches(f.origin, target) {
+            if let visible = visibleFrameRectForElement(element),
+               let currentSize = frame?.size,
+               target.x >= visible.minX,
+               target.y >= visible.minY,
+               target.x + currentSize.width <= visible.maxX,
+               target.y + currentSize.height <= visible.maxY {
+                _ = setPosition(element, target)
+                frame = getFrame(element)
+            }
+        }
+
+        guard let finalFrame = frame else {
+            completion(WireFormat.error("move set succeeded but post-set frame read failed"))
+            return
+        }
+        let response = Self.buildGeometryResponse(
+            frame: finalFrame,
+            requested: ["x": x, "y": y],
+            targetSize: nil,
+            targetOrigin: target,
+            visibleFrame: visibleFrameRectForElement(element)
+        )
+        completion(WireFormat.success(response))
+    }
+
+    // MARK: - PRD-62 geometry helpers
+
+    private func setSize(_ element: AXUIElement, _ size: CGSize) -> AXError? {
+        var s = size
+        guard let axSize = AXValueCreate(.cgSize, &s) else { return .failure }
+        let result = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, axSize)
+        return result == .success ? nil : result
+    }
+
+    private func setPosition(_ element: AXUIElement, _ point: CGPoint) -> AXError? {
+        var p = point
+        guard let axPoint = AXValueCreate(.cgPoint, &p) else { return .failure }
+        let result = AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, axPoint)
+        return result == .success ? nil : result
+    }
+
+    private func settabilityError(element: AXUIElement, attribute: CFString, verb: String) -> [String: Any]? {
+        var settable: DarwinBoolean = false
+        let probe = AXUIElementIsAttributeSettable(element, attribute, &settable)
+        if probe != .success {
+            // If the probe itself fails (e.g. .cannotComplete), surface that —
+            // but don't block the verb on it; some apps refuse the probe yet
+            // honor the set. Fall through.
+            return nil
+        }
+        if !settable.boolValue {
+            return WireFormat.error("\(verb) failed: attribute not settable on this element (use a top-level window ref)")
+        }
+        return nil
+    }
+
+    /// PRD-62 Spec 1: 1px tolerance absorbs AX's CGFloat round-trip noise.
+    static func sizeMatches(_ a: CGSize, _ b: CGSize) -> Bool {
+        return abs(a.width - b.width) < 1.0 && abs(a.height - b.height) < 1.0
+    }
+
+    static func originMatches(_ a: CGPoint, _ b: CGPoint) -> Bool {
+        return abs(a.x - b.x) < 1.0 && abs(a.y - b.y) < 1.0
+    }
+
+    static func frameToDict(_ frame: CGRect) -> [String: Any] {
+        return [
+            "x": frame.origin.x,
+            "y": frame.origin.y,
+            "width": frame.size.width,
+            "height": frame.size.height
+        ]
+    }
+
+    /// Convert an NSScreen rect (bottom-left origin) into AX coords (top-left origin)
+    /// using the primary screen's full-frame height as the global Y reference.
+    /// Apple docs: kAXPositionAttribute → top-left global; NSScreen.frame/visibleFrame → bottom-left.
+    static func axRectFromNSScreenRect(_ vf: CGRect, primaryHeight: CGFloat) -> CGRect {
+        let axY = primaryHeight - (vf.origin.y + vf.height)
+        return CGRect(x: vf.origin.x, y: axY, width: vf.width, height: vf.height)
+    }
+
+    /// Build the PRD-62 response shape from observed frame + intent.
+    /// Pure logic so tests can exercise the clamp classification without AX.
+    static func buildGeometryResponse(
+        frame: CGRect,
+        requested: [String: Any],
+        targetSize: CGSize?,
+        targetOrigin: CGPoint?,
+        visibleFrame: CGRect?
+    ) -> [String: Any] {
+        var clamped = false
+        if let s = targetSize, !sizeMatches(frame.size, s) { clamped = true }
+        if let o = targetOrigin, !originMatches(frame.origin, o) { clamped = true }
+        var response: [String: Any] = [
+            "frame": frameToDict(frame),
+            "requested": requested,
+            "clamped": clamped
+        ]
+        if clamped, let vf = visibleFrame {
+            response["clampedTo"] = frameToDict(vf)
+        }
+        return response
+    }
+
+    /// Returns the NSScreen.visibleFrame of the screen the element's window is
+    /// currently on, converted to AX top-left coordinates. Per Apple:
+    ///   - kAXPositionAttribute: top-left global, (0,0) at top-left of menu-bar screen.
+    ///   - NSScreen.visibleFrame: bottom-left, excludes dock + menu bar.
+    /// We map by the window's center to handle non-rectangular multi-display layouts.
+    private func visibleFrameRectForElement(_ element: AXUIElement) -> CGRect? {
+        guard let frame = getFrame(element) else { return nil }
+        let screens = NSScreen.screens
+        guard let primary = screens.first else { return nil }
+        let primaryHeight = primary.frame.height
+
+        // AX center → NSScreen coord (Y-flip against primary screen height).
+        let axCenter = CGPoint(x: frame.midX, y: frame.midY)
+        let nsCenter = CGPoint(x: axCenter.x, y: primaryHeight - axCenter.y)
+
+        let owning = screens.first(where: { $0.frame.contains(nsCenter) }) ?? NSScreen.main ?? primary
+        return Self.axRectFromNSScreenRect(owning.visibleFrame, primaryHeight: primaryHeight)
     }
 
     private func ensureObserver(pid: pid_t) {

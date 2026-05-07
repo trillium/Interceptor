@@ -4,6 +4,18 @@ import AppKit
 import ScreenCaptureKit
 
 final class VisionDomain: DomainHandler, @unchecked Sendable {
+    /// PRD-63 Spec 2: pure helper for the SCStreamConfiguration dimensions
+    /// derived from a SCContentFilter. Pulled out of acquireImage so it can
+    /// be unit-tested without spinning up an SCK content session. Mirrors
+    /// Apple's "Capturing Screen Content in macOS" sample-code pattern of
+    /// `width = contentRect.width * pointPixelScale` for window mode.
+    static func dimensionsForCaptureBuffer(contentRect: CGRect, pointPixelScale: CGFloat) -> (width: Int, height: Int) {
+        return (
+            max(1, Int(contentRect.width  * pointPixelScale)),
+            max(1, Int(contentRect.height * pointPixelScale))
+        )
+    }
+
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         let sub = action["sub"] as? String ?? command
         switch sub {
@@ -36,14 +48,28 @@ final class VisionDomain: DomainHandler, @unchecked Sendable {
             do {
                 let content = try await SCShareableContent.current
                 let filter: SCContentFilter
+                var targetWindow: SCWindow? = nil
 
+                // PRD-63 Spec 2: pick the LARGEST window owned by the app —
+                // SCK's window list returns helper windows (menu-bar items,
+                // 0×0 shadow windows, 3840×60 toolbar slivers) before the
+                // actual document window. Without this filter Vision was
+                // OCRing menu strips. Mirrors ScreenshotDomain's picker.
+                let largestWindow: (pid_t) -> SCWindow? = { pid in
+                    content.windows
+                        .filter { $0.owningApplication?.processID == pid }
+                        .sorted { ($0.frame.width * $0.frame.height) > ($1.frame.width * $1.frame.height) }
+                        .first
+                }
                 if let appName = appName,
                    let app = content.applications.first(where: { $0.applicationName == appName }),
-                   let window = content.windows.first(where: { $0.owningApplication?.processID == app.processID }) {
+                   let window = largestWindow(app.processID) {
                     filter = SCContentFilter(desktopIndependentWindow: window)
+                    targetWindow = window
                 } else if let frontApp = NSWorkspace.shared.frontmostApplication,
-                          let window = content.windows.first(where: { $0.owningApplication?.processID == frontApp.processIdentifier }) {
+                          let window = largestWindow(frontApp.processIdentifier) {
                     filter = SCContentFilter(desktopIndependentWindow: window)
+                    targetWindow = window
                 } else if let display = content.displays.first {
                     filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
                 } else {
@@ -51,7 +77,35 @@ final class VisionDomain: DomainHandler, @unchecked Sendable {
                     return
                 }
 
+                // PRD-63 Spec 2: prefer the private SkyLight CGSHWCaptureWindowList
+                // path for window captures — same trick ScreenshotDomain uses
+                // for occluded / minimized / off-Space windows where SCK's
+                // SCScreenshotManager.captureSampleBuffer returns a black
+                // buffer. Without this, Vision OCR/face/hand/body detection
+                // returns count:0 for any non-frontmost window because the
+                // SCK path silently delivers an empty frame. Fall back to
+                // SCK only for display captures and as a safety net.
+                if let win = targetWindow,
+                   let cgs = cgsCaptureWindow(
+                    windowID: CGWindowID(win.windowID),
+                    options: [.ignoreGlobalClipShape, .bestResolution, .fullSize]
+                   ) {
+                    completion(cgs)
+                    return
+                }
+
+                // PRD-63 Spec 2: SCStreamConfiguration's width/height default
+                // to 0 (Apple docs: "configure if you need to customize the
+                // output"), which produces degenerate frames for downstream
+                // Vision requests. Derive both from the filter's contentRect
+                // and pointPixelScale so the buffer matches the captured
+                // window/display at native pixel density.
                 let config = SCStreamConfiguration()
+                let dims = Self.dimensionsForCaptureBuffer(
+                    contentRect: filter.contentRect,
+                    pointPixelScale: CGFloat(filter.pointPixelScale))
+                config.width  = dims.width
+                config.height = dims.height
                 let sampleBuffer = try await SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config)
                 guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
                     completion(nil)
@@ -96,13 +150,35 @@ final class VisionDomain: DomainHandler, @unchecked Sendable {
     }
 
     private func recognizeText(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        // Capture sendable scalars before entering the @Sendable closure.
+        let debugDumpPath = action["debugDumpPath"] as? String
         acquireImage(action: action) { image in
             guard let image = image else {
                 completion(WireFormat.error("failed to capture screen"))
                 return
             }
+            // PRD-63 Spec 2 diagnostic: dump the captured image so we can
+            // confirm whether empty-result regressions are capture-side
+            // (blank/off-screen frame) or OCR-side (Vision missed the text).
+            // Off by default; opt-in via --debug-dump on the action object.
+            if let path = debugDumpPath,
+               let dest = CGImageDestinationCreateWithURL(
+                URL(fileURLWithPath: path) as CFURL,
+                "public.jpeg" as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, image, nil)
+                _ = CGImageDestinationFinalize(dest)
+                Platform.log("vision diagnostic: dumped capture to \(path) (\(image.width)x\(image.height))")
+            }
+            // PRD-63 Spec 2: configure the Apple-documented language knobs.
+            // recognitionLanguages is a priority-ordered hint; combined with
+            // automaticallyDetectsLanguage=true Vision uses both — the
+            // priority list as a starting point and live detection on the
+            // actual image content.
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["en-US"]
+            request.automaticallyDetectsLanguage = true
+            request.usesLanguageCorrection = true
             let handler = VNImageRequestHandler(cgImage: image)
             do {
                 try handler.perform([request])

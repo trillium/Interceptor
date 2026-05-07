@@ -170,7 +170,16 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
             // the engine layer enforces the actual permission grant.
             scopeRoot = FileManager.default.homeDirectoryForCurrentUser.path
         default:
-            scopeRoot = FileManager.default.homeDirectoryForCurrentUser.path
+            // PRD-65 Spec 4 / PRD-64 Spec 4: treat any non-alias scope as
+            // an absolute path. Validate via FileManager.fileExists before
+            // adopting; on miss, return a structured error so the caller
+            // sees the rejection instead of a silent override to home.
+            if scope.hasPrefix("/"), FileManager.default.fileExists(atPath: scope) {
+                scopeRoot = scope
+            } else {
+                completion(WireFormat.error("fs_search: scope '\(scope)' is not an alias (home/workspace/granted) and not an absolute path that exists"))
+                return
+            }
         }
 
         // Try Spotlight (NSMetadataQuery) first. We rank filename matches

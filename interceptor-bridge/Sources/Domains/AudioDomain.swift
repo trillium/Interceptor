@@ -228,19 +228,61 @@ final class AudioDomain: DomainHandler, @unchecked Sendable {
     }
 
     private func listOutputDevices(completion: @escaping @Sendable ([String: Any]) -> Void) {
-        completion(WireFormat.success("use 'system_profiler SPAudioDataType' for device list"))
+        // PRD-65 Spec 6 / PRD-64 Spec 6: replace the informational stub
+        // with AVCaptureDevice.DiscoverySession enumeration per Apple docs
+        // (AVFoundation/AVCaptureDevice/DiscoverySession.md). System audio
+        // output isn't a per-device capture concept on macOS — system
+        // sound output goes through a virtual stream — but we surface the
+        // available audio-capable devices tagged with role="output" so
+        // callers get a structured array, not a shell-out hint.
+        completion(WireFormat.success(Self.enumerateAudioDevices(role: "output")))
     }
 
     private func listInputDevices(completion: @escaping @Sendable ([String: Any]) -> Void) {
+        // PRD-65 Spec 6 / PRD-64 Spec 6: structured enumeration via
+        // AVCaptureDevice.DiscoverySession. Default input metadata still
+        // included for the convenience of callers that just want sample
+        // rate / channel count.
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        let devices = Self.enumerateAudioDevices(role: "input")
         completion(WireFormat.success([
             "defaultInput": [
                 "sampleRate": format.sampleRate,
                 "channels": format.channelCount
-            ]
+            ],
+            "devices": devices,
+            "count": devices.count
         ]))
+    }
+
+    /// PRD-65 Spec 6 helper. Enumerates audio capture devices via
+    /// AVCaptureDevice.DiscoverySession and projects each to a structured
+    /// dict. The legacy `AVCaptureDevice.devices(for:)` is deprecated since
+    /// macOS 10.15 (AVFoundation/AVCaptureDevice/devices(for_).md:5);
+    /// DiscoverySession is the documented replacement.
+    static func enumerateAudioDevices(role: String) -> [[String: Any]] {
+        let deviceTypes: [AVCaptureDevice.DeviceType] = [
+            .microphone,
+            .external
+        ]
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .audio,
+            position: .unspecified
+        )
+        return session.devices.map { dev in
+            return [
+                "uniqueID": dev.uniqueID,
+                "localizedName": dev.localizedName,
+                "manufacturer": dev.manufacturer,
+                "modelID": dev.modelID,
+                "deviceType": dev.deviceType.rawValue,
+                "isConnected": dev.isConnected,
+                "role": role
+            ]
+        }
     }
 }
 
