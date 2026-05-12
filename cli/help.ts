@@ -309,8 +309,26 @@ Native (macOS Bridge — full install only):
 
   Recording & Replay:
   interceptor macos monitor start [--instruction "<intent>"]
-  interceptor macos monitor stop|tail|list|status
+                                  [--app <name>|<bundleId>] [--apps a,b,c] [--all-apps]
+                                  [--include input|files|clipboard|network|notifications|log|speech]
+                                  [--exclude key|mouse-moved]
+                                  [--frames <fps>] [--vision-text]
+                                  [--frame-format jpeg|png|webp]   # default jpeg
+                                  [--frame-quality 0..100]         # default 80
+                                  [--frame-max-long-edge <px>]     # resize at capture
+                                  [--tap]                          # CGEventTap fallback
+                                  [--watch-path <path>] [--watch-paths p1,p2,...]
+                                  [--log-predicate "<NSPredicate format>"]
+  interceptor macos monitor stop | pause | resume | status [--sid <sid>]
+  interceptor macos monitor tail [--sid <sid>] [--limit N] [--raw]
+  interceptor macos monitor list
   interceptor macos monitor export <sid> [--plan|--json] [--limit N]
+                                  Permissions: Accessibility always required;
+                                               --frames adds Screen Recording;
+                                               --include speech adds Microphone.
+                                  Multi-session: N concurrent sessions supported;
+                                               disambiguate with --sid <sid> on
+                                               stop/pause/resume/status/tail.
 
   Display / Stream / Container / Overlays:
   interceptor macos display list|set <resolution> [--id N] [--hidpi] [--hz N]

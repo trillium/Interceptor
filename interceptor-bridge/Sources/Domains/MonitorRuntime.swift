@@ -1,0 +1,84 @@
+import Foundation
+import AppKit
+import ApplicationServices
+import CoreFoundation
+import CoreImage
+import CoreMedia
+import Network
+#if canImport(OSLog)
+import OSLog
+#endif
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
+#if canImport(Vision)
+import Vision
+#endif
+#if canImport(Speech)
+import Speech
+import AVFoundation
+#endif
+
+// MonitorRuntime owns the live observation infrastructure for a single
+// monitor session. Pulled out of MonitorDomain so the domain can keep an
+// N-element `[sid: MonitorRuntime]` map and run multiple concurrent sessions,
+// each with its own scope, includes, AX observers, NSEvent global monitor,
+// optional CGEventTap, source timers, and capture/speech state.
+//
+// Each runtime is created on session start, torn down on session stop. The
+// bridges within ARE NOT shared across sessions — N concurrent monitors each
+// get their own AXObserver registry, NSEvent global monitor, etc. Apple's
+// NSEvent and CGEventTap APIs both support multiple registrations per
+// process; AXObserver-per-PID matches the documented contract ("To handle
+// multiple applications, you have to create at least one observer per
+// application").
+
+final class MonitorRuntime: @unchecked Sendable {
+    let session: MonitorSession
+    weak var domain: MonitorDomain?
+
+    let axBridge = MonitorAxBridge()
+    let workspaceBridge = MonitorWorkspaceBridge()
+    let inputBridge = MonitorInputBridge()
+    let tapBridge = MonitorTapBridge()
+
+    // Whether the CGEventTap fallback is in use for this session.
+    var tapActive = false
+
+    // Optional source state. Nil unless the matching --include flag was set.
+    var pasteboardTimer: DispatchSourceTimer?
+    var lastPasteboardChangeCount: Int = -1
+
+    var fsStream: FSEventStreamRef?
+    var fsPaths: [String] = []
+
+    var pathMonitor: NWPathMonitor?
+    var lastPathStatus: NWPath.Status?
+
+    var logTimer: DispatchSourceTimer?
+    var logCursorDate: Date?
+    var logPredicate: String?
+
+    var distNotificationObservers: [NSObjectProtocol] = []
+
+    // Retention timer.
+    var autoStopTimer: DispatchSourceTimer?
+    static let sessionMaxDurationSeconds: TimeInterval = 24 * 60 * 60
+    static let sessionMaxBytesPerFile: Int64 = 100 * 1024 * 1024
+
+    #if canImport(ScreenCaptureKit)
+    var captureStream: SCStream?
+    var captureOutput: MonitorCaptureOutput?
+    #endif
+
+    #if canImport(Speech)
+    var speechEngine: AVAudioEngine?
+    var speechRequest: SFSpeechAudioBufferRecognitionRequest?
+    var speechTask: SFSpeechRecognitionTask?
+    #endif
+
+    init(session: MonitorSession, domain: MonitorDomain) {
+        self.session = session
+        self.domain = domain
+    }
+}

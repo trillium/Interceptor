@@ -246,6 +246,117 @@ export function renderEvent(ev: MonEvent, base: number): string {
       const u = ev.u ? shortUrl(ev.u) : "?"
       return `  ${rel}  ${k}  ${ev.typ || "?"} \u2192 ${u}  ${cause}`
     }
+    // macOS event-kind rendering. Each row: relative-time, padded
+    // event name, then the most-distinctive payload field for the kind.
+    case "frontmost":
+    case "app_launch":
+    case "app_terminate":
+    case "app_hide":
+    case "app_unhide":
+    case "app_deactivate": {
+      const app = (ev as { app?: string }).app || "?"
+      const bid = (ev as { bundleId?: string }).bundleId
+      return `  ${rel}  ${k}  ${app}${bid ? `  (${bid})` : ""}`
+    }
+    case "space":
+    case "wake":
+    case "sleep":
+    case "session_active":
+    case "session_inactive":
+      return `  ${rel}  ${k}`
+    case "mount":
+    case "unmount":
+    case "volume_rename": {
+      const path = (ev as { path?: string }).path || "?"
+      return `  ${rel}  ${k}  ${path}`
+    }
+    case "window_create":
+    case "window_move":
+    case "window_resize":
+    case "window_min":
+    case "window_demin":
+    case "window_focus": {
+      const app = (ev as { app?: string }).app || ""
+      const title = (ev as { n?: string }).n
+      const frame = (ev as { frame?: { x: number; y: number; w: number; h: number } }).frame
+      const f = frame ? `[${frame.x},${frame.y} ${frame.w}x${frame.h}]` : ""
+      return `  ${rel}  ${k}  ${app}  ${title ? `"${title}"` : ""}  ${f}`
+    }
+    case "menu_open":
+    case "menu_close":
+    case "menu_select": {
+      const name = (ev as { n?: string }).n || ""
+      const app = (ev as { app?: string }).app || ""
+      return `  ${rel}  ${k}  ${app}  "${name}"`
+    }
+    case "sheet":
+    case "layout_change":
+    case "ax_app_activated":
+    case "ax_app_deactivated":
+    case "ax_create":
+    case "ax_destroy":
+    case "ax_other": {
+      const app = (ev as { app?: string }).app || ""
+      const role = (ev as { r?: string }).r || ""
+      return `  ${rel}  ${k}  ${app}  ${role}`
+    }
+    case "selection":
+    case "selection_rows":
+    case "title_change": {
+      const role = (ev as { r?: string }).r || ""
+      const title = (ev as { n?: string }).n || ""
+      return `  ${rel}  ${k}  ${role}  "${title}"`
+    }
+    case "mouseup":
+    case "move": {
+      const x = (ev as { x?: number }).x ?? 0
+      const y = (ev as { y?: number }).y ?? 0
+      return `  ${rel}  ${k}  (${x},${y})`
+    }
+    case "mods": {
+      const m = (ev as { mods?: string }).mods || ""
+      return `  ${rel}  ${k}  ${m}`
+    }
+    case "clipboard": {
+      const cc = (ev as { changeCount?: number }).changeCount ?? 0
+      const types = ((ev as { types?: string[] }).types || []).slice(0, 3).join(",")
+      const preview = ((ev as { preview?: string }).preview || "").slice(0, 40)
+      return `  ${rel}  ${k}  cc=${cc}  ${types}  "${preview}"`
+    }
+    case "file_change": {
+      const path = (ev as { path?: string }).path || "?"
+      return `  ${rel}  ${k}  ${path}`
+    }
+    case "network_path": {
+      const status = (ev as { status?: string }).status || ""
+      const ifs = ((ev as { interfaces?: string[] }).interfaces || []).join(",")
+      return `  ${rel}  ${k}  ${status}  ${ifs}`
+    }
+    case "notification": {
+      const name = (ev as { name?: string }).name || ""
+      const src = (ev as { source?: string }).source || ""
+      return `  ${rel}  ${k}  ${src}:${name}`
+    }
+    case "log": {
+      const level = (ev as { level?: string }).level || ""
+      const subsystem = (ev as { subsystem?: string }).subsystem || ""
+      const msg = ((ev as { message?: string }).message || "").slice(0, 80)
+      return `  ${rel}  ${k}  [${level}]  ${subsystem}  ${msg}`
+    }
+    case "frame": {
+      const w = (ev as { w?: number }).w ?? 0
+      const h = (ev as { h?: number }).h ?? 0
+      const path = (ev as { path?: string }).path || ""
+      return `  ${rel}  ${k}  ${w}x${h}  ${path}`
+    }
+    case "ocr_text": {
+      const blocks = ((ev as { blocks?: unknown[] }).blocks || []).length
+      return `  ${rel}  ${k}  ${blocks} blocks`
+    }
+    case "speech_segment": {
+      const text = ((ev as { text?: string }).text || "").slice(0, 60)
+      return `  ${rel}  ${k}  "${text}"`
+    }
     default:
       return `  ${rel}  ${k}  ${JSON.stringify(ev).slice(0, 200)}`
   }

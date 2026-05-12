@@ -154,42 +154,146 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
     }
 
     // MARK: fs_search
+    //
+    // Wire contract (input action fields):
+    //   query   String — required, substring match. "*" / "**" → wildcard listing.
+    //   scope   String — alias ("everywhere" | "cwd" | "workspace" | "home" |
+    //                    "granted" | "path") OR an absolute path. Default: "everywhere".
+    //   paths   [String]? — only honored when scope == "path"; multi-root search.
+    //   cwd     String? — when scope is "cwd" or "workspace", root the search here.
+    //                     If absent, falls back to the user's home directory.
+    //   kinds   [String]? — additive UTI-style filter (e.g. "public.folder",
+    //                       "directory", "file"). Empty/absent means "any".
+    //   limit   Int — cap match count. Default: 20.
+    //
+    // Behavior:
+    //   - "everywhere" uses NSMetadataQueryLocalComputerScope; BFS fallback is
+    //     skipped because walking / unbounded would block this thread for
+    //     minutes.
+    //   - "cwd"/"workspace" route through the optional cwd field.
+    //   - "path" with a non-empty paths array searches that multi-root set.
+    //   - Wildcard-only queries on a rooted scope return a shallow native
+    //     directory listing immediately (source: "direct_listing").
+    //   - An unknown scope string is treated as an absolute path; if it isn't
+    //     an existing absolute path, the caller gets a structured error
+    //     instead of a silent override to home.
     private func handleSearch(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         guard let query = action["query"] as? String, !query.isEmpty else {
             completion(WireFormat.error("fs_search: missing query"))
             return
         }
-        let scope = (action["scope"] as? String) ?? "workspace"
+        let scope = (action["scope"] as? String) ?? "everywhere"
         let limit = (action["limit"] as? Int) ?? 20
-        let scopeRoot: String
+        let sessionCwd = action["cwd"] as? String
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let requestedKinds = normalizedKinds(action["kinds"] as? [String])
+
+        // Build the list of search roots. Spotlight accepts either path
+        // strings or one of the well-known scope constants (e.g.
+        // NSMetadataQueryLocalComputerScope = "kMDQueryScopeComputer"). The
+        // BFS fallback only walks path roots; for "everywhere" it bails since
+        // walking / unbounded would block this thread for minutes.
+        let mqScopes: [Any]
+        let bfsRoots: [String]
+        let scopeLabel: String
         switch scope {
+        case "everywhere":
+            mqScopes = [NSMetadataQueryLocalComputerScope]
+            bfsRoots = []
+            scopeLabel = "everywhere"
+        case "cwd":
+            let root = sessionCwd ?? homePath
+            mqScopes = [root]
+            bfsRoots = [root]
+            scopeLabel = root
+        case "workspace":
+            let root = sessionCwd ?? homePath
+            mqScopes = [root]
+            bfsRoots = [root]
+            scopeLabel = root
         case "home":
-            scopeRoot = FileManager.default.homeDirectoryForCurrentUser.path
-        case "granted", "workspace":
-            // Both workspace and granted scope to the user's home directory;
-            // the engine layer enforces the actual permission grant.
-            scopeRoot = FileManager.default.homeDirectoryForCurrentUser.path
+            mqScopes = [homePath]
+            bfsRoots = [homePath]
+            scopeLabel = homePath
+        case "granted":
+            // Engine layer enforces the actual permission grant; the bridge
+            // scopes to home as the broadest default.
+            mqScopes = [homePath]
+            bfsRoots = [homePath]
+            scopeLabel = homePath
+        case "path":
+            let paths = (action["paths"] as? [String])?.filter { !$0.isEmpty } ?? []
+            if paths.isEmpty {
+                completion(WireFormat.error("fs_search: scope 'path' requires a non-empty paths array"))
+                return
+            }
+            // Validate every path; reject the request rather than silently
+            // dropping unreadable entries.
+            for p in paths {
+                if !p.hasPrefix("/") || !FileManager.default.fileExists(atPath: p) {
+                    completion(WireFormat.error("fs_search: scope 'path' entry '\(p)' is not an absolute path that exists"))
+                    return
+                }
+            }
+            mqScopes = paths
+            bfsRoots = paths
+            scopeLabel = paths.joined(separator: ":")
         default:
-            // PRD-65 Spec 4 / PRD-64 Spec 4: treat any non-alias scope as
-            // an absolute path. Validate via FileManager.fileExists before
-            // adopting; on miss, return a structured error so the caller
-            // sees the rejection instead of a silent override to home.
+            // Treat any non-alias scope as an absolute path. Validate via
+            // FileManager.fileExists before adopting; on miss, return a
+            // structured error so the caller sees the rejection instead of
+            // a silent override to home.
             if scope.hasPrefix("/"), FileManager.default.fileExists(atPath: scope) {
-                scopeRoot = scope
+                mqScopes = [scope]
+                bfsRoots = [scope]
+                scopeLabel = scope
             } else {
-                completion(WireFormat.error("fs_search: scope '\(scope)' is not an alias (home/workspace/granted) and not an absolute path that exists"))
+                completion(WireFormat.error("fs_search: scope '\(scope)' is not an alias (everywhere/cwd/workspace/home/granted/path) and not an absolute path that exists"))
                 return
             }
         }
 
-        // Try Spotlight (NSMetadataQuery) first. We rank filename matches
-        // higher than content matches by issuing a compound predicate.
+        // Finder-style wildcard listing should behave like a directory listing,
+        // not a literal substring search for the `*` character. For rooted
+        // path scopes, skip Spotlight entirely and return a shallow native
+        // listing immediately.
+        if isWildcardOnlyQuery(query), !bfsRoots.isEmpty {
+            var allMatches: [[String: Any]] = []
+            for root in bfsRoots {
+                if allMatches.count >= limit { break }
+                let remaining = limit - allMatches.count
+                let chunk = self.directPathListing(root: root, limit: remaining, requestedKinds: requestedKinds)
+                allMatches.append(contentsOf: chunk)
+            }
+            completion(WireFormat.success([
+                "matches": allMatches,
+                "indexed": false,
+                "source": "direct_listing",
+                "scope": scopeLabel,
+                "query": query,
+                "count": allMatches.count
+            ]))
+            return
+        }
+
+        // Try Spotlight (NSMetadataQuery) first. For machine-wide
+        // ("everywhere") scope, only match filenames — kMDItemTextContent
+        // across LocalComputerScope is unbounded and routinely blows past
+        // the gather window. Narrower scopes can still use the compound
+        // name+content predicate.
         let mq = NSMetadataQuery()
-        mq.searchScopes = [scopeRoot]
-        mq.predicate = NSPredicate(
-            format: "(kMDItemDisplayName LIKE[cd] %@) OR (kMDItemFSName LIKE[cd] %@) OR (kMDItemTextContent LIKE[cd] %@)",
-            "*\(query)*", "*\(query)*", "*\(query)*"
-        )
+        mq.searchScopes = mqScopes
+        if scope == "everywhere" {
+            mq.predicate = NSPredicate(
+                format: "(kMDItemDisplayName LIKE[cd] %@) OR (kMDItemFSName LIKE[cd] %@)",
+                "*\(query)*", "*\(query)*"
+            )
+        } else {
+            mq.predicate = NSPredicate(
+                format: "(kMDItemDisplayName LIKE[cd] %@) OR (kMDItemFSName LIKE[cd] %@) OR (kMDItemTextContent LIKE[cd] %@)",
+                "*\(query)*", "*\(query)*", "*\(query)*"
+            )
+        }
         mq.sortDescriptors = [NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)]
 
         let lock = NSLock()
@@ -201,12 +305,17 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
             for i in 0..<min(query.resultCount, max) {
                 guard let item = query.result(at: i) as? NSMetadataItem,
                       let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { continue }
+                let pathUrl = URL(fileURLWithPath: path)
+                let kindLabel = item.value(forAttribute: NSMetadataItemKindKey) as? String
+                if !self.matchesKinds(requestedKinds, at: pathUrl, kindLabel: kindLabel) {
+                    continue
+                }
                 var entry: [String: Any] = ["path": path]
                 if let name = item.value(forAttribute: NSMetadataItemDisplayNameKey) as? String ??
                               item.value(forAttribute: NSMetadataItemFSNameKey) as? String {
                     entry["name"] = name
                 }
-                if let kind = item.value(forAttribute: NSMetadataItemKindKey) as? String { entry["kind"] = kind }
+                if let kindLabel { entry["kind"] = kindLabel }
                 if let size = item.value(forAttribute: NSMetadataItemFSSizeKey) as? Int { entry["size"] = size }
                 if let modified = item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date {
                     entry["modified"] = ISO8601DateFormatter().string(from: modified)
@@ -223,7 +332,8 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
             completion(WireFormat.success([
                 "matches": matches,
                 "indexed": indexed,
-                "scope": scopeRoot,
+                "source": indexed ? "spotlight" : "fallback",
+                "scope": scopeLabel,
                 "query": query,
                 "count": matches.count
             ]))
@@ -256,9 +366,17 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
                 finish(snap, indexed: true)
                 return
             }
-            // Spotlight had nothing. Run the breadth-first enumerator fallback.
-            let matches = self.fallbackBfsSearch(query: query, root: scopeRoot, limit: limit)
-            finish(matches, indexed: false)
+            // Spotlight had nothing. Run the breadth-first enumerator fallback
+            // across every BFS root (skip when scope is "everywhere" since
+            // walking / unbounded would block this thread for minutes).
+            var allMatches: [[String: Any]] = []
+            for root in bfsRoots {
+                if allMatches.count >= limit { break }
+                let remaining = limit - allMatches.count
+                let chunk = self.fallbackBfsSearch(query: query, root: root, limit: remaining, requestedKinds: requestedKinds)
+                allMatches.append(contentsOf: chunk)
+            }
+            finish(allMatches, indexed: false)
         }
     }
 
@@ -266,7 +384,7 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
     /// children FIRST (so `Downloads` is hit before `Library` swallows the
     /// scan budget). Walks one level deep by default; matches against
     /// filename substrings (case-insensitive). Bounded at 10k items.
-    private func fallbackBfsSearch(query: String, root: String, limit: Int) -> [[String: Any]] {
+    private func fallbackBfsSearch(query: String, root: String, limit: Int, requestedKinds: Set<String>) -> [[String: Any]] {
         let fm = FileManager.default
         let lower = query.lowercased()
         var matches: [[String: Any]] = []
@@ -293,10 +411,12 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
                 scanned += 1
                 if scanned >= maxScanned { break }
                 let name = child.lastPathComponent
-                if name.lowercased().contains(lower) {
+                let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                if matchesQuery(name: name, normalizedQuery: lower) && matchesKinds(requestedKinds, at: child, kindLabel: isDir ? "directory" : "file") {
                     var entry: [String: Any] = [
                         "path": child.path,
-                        "name": name
+                        "name": name,
+                        "kind": isDir ? "directory" : "file"
                     ]
                     if let attrs = try? child.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
                         if let size = attrs.fileSize { entry["size"] = size }
@@ -307,7 +427,7 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
                     matches.append(entry)
                     if matches.count >= limit { break }
                 }
-                if d < maxDepth, let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory), isDir == true {
+                if d < maxDepth, isDir {
                     // Skip noisy system-managed subtrees.
                     let bn = child.lastPathComponent
                     if bn == "Library" && d == 0 { continue }
@@ -317,6 +437,100 @@ final class FsDomain: DomainHandler, @unchecked Sendable {
             }
         }
         return matches
+    }
+
+    /// Shallow rooted listing used for wildcard path-scoped searches.
+    /// This matches what users expect from Finder-style `*` searches: return
+    /// the immediate contents of the folder, filtered by kind.
+    private func directPathListing(root: String, limit: Int, requestedKinds: Set<String>) -> [[String: Any]] {
+        let fm = FileManager.default
+        let rootUrl = URL(fileURLWithPath: root)
+        let isoFmt = ISO8601DateFormatter()
+        guard let children = try? fm.contentsOfDirectory(
+            at: rootUrl,
+            includingPropertiesForKeys: [.nameKey, .fileSizeKey, .contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var out: [[String: Any]] = []
+        for child in children.sorted(by: { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }) {
+            if out.count >= limit { break }
+            let isDir = isDirectory(at: child)
+            if !matchesKinds(requestedKinds, at: child, kindLabel: isDir ? "directory" : "file") {
+                continue
+            }
+            var entry: [String: Any] = [
+                "path": child.path,
+                "name": child.lastPathComponent,
+                "kind": isDir ? "directory" : "file",
+            ]
+            if let attrs = try? child.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+                if let size = attrs.fileSize { entry["size"] = size }
+                if let modified = attrs.contentModificationDate {
+                    entry["modified"] = isoFmt.string(from: modified)
+                }
+            }
+            out.append(entry)
+        }
+        return out
+    }
+
+    /// Treat shell-style wildcard-only queries like `*` / `**` as "match all"
+    /// in the enumerator fallback. Spotlight's predicate language can use `*`
+    /// as a wildcard, but the fallback is plain filename substring matching.
+    private func matchesQuery(name: String, normalizedQuery: String) -> Bool {
+        let trimmed = normalizedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isWildcardOnlyQuery(trimmed) {
+            return true
+        }
+        return name.lowercased().contains(trimmed)
+    }
+
+    private func isWildcardOnlyQuery(_ query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed.allSatisfy { $0 == "*" || $0 == "?" }
+    }
+
+    /// Normalize kind filters to a lowercase set. These filters are additive
+    /// over Spotlight/fallback search and intentionally broad so callers can
+    /// ask for directory/file classes or pass UTI-style labels like
+    /// `public.folder`.
+    private func normalizedKinds(_ kinds: [String]?) -> Set<String> {
+        Set((kinds ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty })
+    }
+
+    private func matchesKinds(_ requestedKinds: Set<String>, at url: URL, kindLabel: String?) -> Bool {
+        if requestedKinds.isEmpty {
+            return true
+        }
+        let isDir = isDirectory(at: url)
+        let normalizedKindLabel = kindLabel?.lowercased() ?? ""
+        for requested in requestedKinds {
+            switch requested {
+            case "directory", "directories", "dir", "folder", "folders", "public.folder", "public.directory":
+                if isDir { return true }
+            case "file", "files", "public.data", "public.item":
+                if !isDir { return true }
+            default:
+                if requested.hasSuffix(".folder") || requested.hasSuffix(".directory") {
+                    if isDir { return true }
+                    continue
+                }
+                if !normalizedKindLabel.isEmpty && normalizedKindLabel.contains(requested) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func isDirectory(at url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 
     // MARK: shared helpers

@@ -278,7 +278,9 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
 
     /// resize a CGImage via CoreGraphics. Bilinear-style filtering at
     /// `.high` interpolation quality. Returns nil on context-creation failure.
-    private static func resize(cgImage: CGImage, width: Int, height: Int) -> CGImage? {
+    /// Internal-default access so MonitorDomain's frame-capture path can
+    /// reuse the same resize helper without duplicating the bitmap pipeline.
+    static func resize(cgImage: CGImage, width: Int, height: Int) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let bytesPerRow = 0
         let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
@@ -298,7 +300,9 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
 
     /// encode a CGImage to png/jpeg/webp via CGImageDestination.
     /// WebP at q85 by default per academic evidence (ACAD-COMPRESS-BENCH).
-    private static func encode(cgImage: CGImage, format: String, quality: Int) -> Data? {
+    /// Internal-default access so MonitorDomain's frame-capture path can
+    /// share this encoder instead of writing PNG via NSBitmapImageRep.
+    static func encode(cgImage: CGImage, format: String, quality: Int) -> Data? {
         let utType: UTType
         switch format.lowercased() {
         case "png":  utType = .png

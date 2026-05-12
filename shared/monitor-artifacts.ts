@@ -3,10 +3,24 @@ import { join } from "node:path"
 import { MONITOR_SESSIONS_DIR } from "./platform"
 
 export const MONITOR_EVENT_NAMES = new Set([
+  // Lifecycle (shared)
   "mon_start", "mon_stop", "mon_pause", "mon_resume", "mon_attach", "mon_detach",
+  // Input / interaction (shared)
   "click", "dblclick", "rclick", "input", "change", "submit",
   "key", "scroll", "focus", "blur", "copy", "paste",
-  "mut", "fetch", "xhr", "sse", "nav", "reload", "error"
+  "mut", "fetch", "xhr", "sse", "nav", "reload", "error",
+  // macOS-only event kinds. AX-backed unless noted.
+  "mouseup", "move", "mods",
+  "selection", "selection_rows", "title_change", "window_focus",
+  "window_create", "window_move", "window_resize", "window_min", "window_demin",
+  "menu_open", "menu_close", "menu_select", "sheet", "layout_change",
+  "ax_app_activated", "ax_app_deactivated", "ax_create", "ax_destroy", "ax_other",
+  "frontmost", "app_launch", "app_terminate", "app_hide", "app_unhide", "app_deactivate",
+  "space", "wake", "sleep", "session_active", "session_inactive",
+  "mount", "unmount", "volume_rename",
+  "clipboard", "file_change", "network_path", "notification",
+  "log", "log_unavailable", "log_error",
+  "frame", "frame_error", "frame_encode_error", "ocr_text", "speech_segment"
 ])
 
 export type MonitorEvent = {
@@ -47,18 +61,32 @@ export type MonitorAttachmentMeta = {
 
 export type MonitorSessionMeta = {
   artifactVersion: number
+  // Surface discriminator. Browser-side sessions write "browser" (or omit,
+  // treated as "browser" by the CLI). macOS sessions write "macos".
+  surface?: "browser" | "macos"
   sessionId: string
   startedAt: number
   endedAt?: number
   status: "active" | "stopped"
   paused: boolean
   rootTabId?: number
+  // macOS-only root identifiers (set by MonitorDomain on first attach).
+  rootPid?: number
+  rootBundleId?: string
+  rootApp?: string
+  appsObserved?: string[]
   instruction?: string
   url?: string
   activeAttachmentKey?: string
-  counts?: { evt: number; mut: number; net: number; nav: number }
+  counts?: { evt: number; mut: number; net: number; nav: number; ax?: number }
   stopReason?: string
   attachments: MonitorAttachmentMeta[]
+  // TCC consent snapshot at session start (macOS only).
+  tcc?: { accessibility: boolean; screenRecording?: boolean; microphone?: boolean }
+  // Observation scope and include-set for macOS sessions.
+  scope?: { mode: "frontmost" | "apps" | "all"; apps?: string[] }
+  includes?: string[]
+  excludes?: string[]
 }
 
 export type MonitorNetArtifact = {

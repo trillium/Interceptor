@@ -144,7 +144,7 @@ Every command in this table has been live-verified to leave frontmost untouched.
 7. Cross-app routing: `intent dispatch --bundle <id> --script <applescript>`, `intent warmup`.
 8. System reads: `notifications tail`, `clipboard read/write/tail`, `files watch`, `fs read/write/search`, `url get/post`, `log query`. Per PRD-65: `fs search --scope <alias-or-absolute-path>` honors `home` / `workspace` / `granted` aliases AND absolute paths (`--scope /tmp`, `--scope /Users/me/Projects`); unresolvable paths return `error: fs_search: scope '...' is not an alias and not an absolute path that exists` instead of silently overriding to home. `log query` runs against `OSLogStore.local()` (system-wide), so `--predicate 'subsystem == "com.apple.WindowServer"'` actually returns entries from other processes.
 9. Overlays: `overlay *` — panic hotkey `Ctrl+Opt+Cmd+Escape` always available.
-10. Recording: `monitor start/stop/tail/export [--plan]`.
+10. Recording: `monitor start/stop/pause/resume/status/tail/list/export [--plan|--json]`. Scope: `--app`, `--apps a,b`, `--all-apps`. Optional sources: `--include clipboard|files|network|log|notifications|speech` plus `--frames N`, `--vision-text`, `--watch-path <p>`, `--log-predicate "<NSPredicate>"`. Always requires Accessibility TCC; `--frames` adds Screen Recording, `--include speech` adds Microphone. Sessions persist NDJSON to `${INTERCEPTOR_MONITOR_SESSIONS_DIR:-/tmp/interceptor-monitor-sessions}/<sid>/` and auto-stop after 24h with 100 MiB rotation.
 
 ## Daily-Driver Domains
 

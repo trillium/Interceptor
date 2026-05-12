@@ -890,18 +890,51 @@ The `--save` response contains `{ "filePath": "...", "format": ..., "bytes": ...
 
 ### Daily-Driver Domain 4: Monitor (Teach and Replay)
 
-Same pattern as the browser monitor. Record what the user does across native apps, export a replayable script.
+Same pattern as the browser monitor. Record what the user does across native apps via per-PID `AXObserver` + `NSWorkspace` + `NSEvent` global monitor, persist NDJSON to a per-session directory, then export a replayable script. The full surface covers AX-backed focus / value / menu / sheet / window events, NSEvent clicks / keys / scrolls / modifiers (with the coordinate-bug fix from the previous scaffold), and optional clipboard / file / network / log / notification / frame / OCR / speech inclusions gated by `--include`.
 
 ```bash
-interceptor macos monitor start                  # Record all user interactions
+# Phase 1 — core monitor (Accessibility TCC required)
+interceptor macos monitor start                  # frontmost-app default scope
 interceptor macos monitor start --instruction "Show me how you file expenses"
-interceptor macos monitor stop                   # Stop + summary
-interceptor macos monitor tail                   # Live event stream
-interceptor macos monitor export <sid>           # Pretty timeline with timestamps
-interceptor macos monitor export <sid> --plan    # Replayable interceptor macos script
+interceptor macos monitor start --app Slack      # scope to a single app
+interceptor macos monitor start --apps Slack,Mail
+interceptor macos monitor start --all-apps       # every running PID + new launches
+interceptor macos monitor stop | pause | resume | status
+
+# Phase 2 — optional observation sources
+interceptor macos monitor start --include clipboard
+interceptor macos monitor start --include files --watch-path ~/Downloads
+interceptor macos monitor start --include network
+
+# Phase 3 — analysis layers
+interceptor macos monitor start --include log --log-predicate "subsystem == 'com.tinyspeck.slackmacgap'"
+interceptor macos monitor start --include notifications
+
+# Phase 4 — co-recording (Screen Recording / Microphone TCC required)
+interceptor macos monitor start --frames 1                       # 1 fps SCStream
+interceptor macos monitor start --frames 1 --vision-text         # + Vision OCR per frame
+interceptor macos monitor start --include speech                 # SFSpeechRecognizer live
+
+# Read paths
+interceptor macos monitor tail                                   # live tail
+interceptor macos monitor list                                   # all sessions on disk
+interceptor macos monitor export <sid>                           # timeline
+interceptor macos monitor export <sid> --plan                    # replayable interceptor macos *
+interceptor macos monitor export <sid> --json                    # raw NDJSON
 ```
 
-Captures clicks, keystrokes, scrolls, app switches with timestamps and AX element annotations. Same sparse JSON format as browser monitor.
+Sessions live at `${INTERCEPTOR_MONITOR_SESSIONS_DIR:-/tmp/interceptor-monitor-sessions}/<sid>/` with `events.jsonl`, `session.json`, optionally `frames/`. Records auto-stop after 24h and rotate `events.jsonl` at 100 MiB.
+
+Permissions:
+
+| Mode | TCC required |
+|---|---|
+| Default (no `--include` / no `--frames`) | Accessibility |
+| `--frames N` or `--vision-text` | Accessibility + Screen Recording |
+| `--include speech` | Accessibility + Microphone |
+| Other `--include` flags (clipboard / files / network / log / notifications) | Accessibility |
+
+Missing TCC produces structured errors: `missing_tcc:Accessibility` (exit 2), `missing_tcc:ScreenRecording` (exit 3), with `remediation:` field pointing at the corresponding `interceptor macos trust --*-prompt`.
 
 ### Daily-Driver Domain 5: Clipboard
 

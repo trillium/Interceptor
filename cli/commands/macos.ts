@@ -582,9 +582,50 @@ export function parseMacosCommand(filtered: string[]): Action | null {
     }
 
     // ── Monitor ──
+    // Full surface for `interceptor macos monitor *`. The bridge
+    // (interceptor-bridge/Sources/Domains/MonitorDomain.swift) reads the
+    // forwarded fields off action[]: sub, sid, instruction, app/apps/allApps,
+    // include[]/exclude[], frames, visionText, watchPath/watchPaths,
+    // logPredicate, format, raw, limit. Field names here are stable wire-
+    // format keys consumed by the Swift handler.
     case "monitor": {
       const op = filtered[2] || "status"
-      return {
+      // Scope flags.
+      const appFlag = flagVal(filtered, "--app")
+      const appsRaw = collectMulti(filtered, "--apps")
+      const apps = appsRaw.length > 0
+        ? appsRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined
+      const allApps = filtered.includes("--all-apps")
+      // Include / exclude sets (comma-separated or repeated).
+      const includesRaw = collectMulti(filtered, "--include")
+      const include = includesRaw.length > 0
+        ? includesRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined
+      const excludesRaw = collectMulti(filtered, "--exclude")
+      const exclude = excludesRaw.length > 0
+        ? excludesRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined
+      // Co-recording knobs.
+      const frames = flagInt(filtered, "--frames")
+      const visionText = filtered.includes("--vision-text")
+      // Frame-encoding knobs. Default jpeg q=80 mirrors CaptureDomain
+      // (interceptor-bridge/Sources/Domains/CaptureDomain.swift:84-86).
+      const frameFormat = flagVal(filtered, "--frame-format")
+      const frameQuality = flagInt(filtered, "--frame-quality")
+      const frameMaxLongEdge = flagInt(filtered, "--frame-max-long-edge")
+      // CGEventTap fallback opt-in.
+      const tap = filtered.includes("--tap")
+      // File-watch paths.
+      const watchPath = flagVal(filtered, "--watch-path")
+      const watchPathsRaw = collectMulti(filtered, "--watch-paths")
+      const watchPaths = watchPathsRaw.length > 0
+        ? watchPathsRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined
+      // Log-predicate override.
+      const logPredicate = flagVal(filtered, "--log-predicate")
+
+      const action: Action = {
         type: "macos_monitor",
         sub: op,
         sid: flagVal(filtered, "--sid") || (op === "export" ? filtered[3] : undefined),
@@ -593,6 +634,21 @@ export function parseMacosCommand(filtered: string[]): Action | null {
         raw: filtered.includes("--raw"),
         limit: flagInt(filtered, "--limit"),
       }
+      if (appFlag) action.app = appFlag
+      if (apps) action.apps = apps
+      if (allApps) action.allApps = true
+      if (include) action.include = include
+      if (exclude) action.exclude = exclude
+      if (typeof frames === "number") action.frames = frames
+      if (visionText) action.visionText = true
+      if (frameFormat) action.frameFormat = frameFormat
+      if (typeof frameQuality === "number") action.frameQuality = frameQuality
+      if (typeof frameMaxLongEdge === "number") action.frameMaxLongEdge = frameMaxLongEdge
+      if (tap) action.tap = true
+      if (watchPath) action.watchPath = watchPath
+      if (watchPaths) action.watchPaths = watchPaths
+      if (logPredicate) action.logPredicate = logPredicate
+      return action
     }
 
     // ── Compound Commands ──
@@ -674,12 +730,33 @@ export function parseMacosCommand(filtered: string[]): Action | null {
         case "search": {
           const query = filtered[3]
           if (!query) { console.error("error: interceptor macos fs search requires a query"); process.exit(1) }
-          return {
+          const action: Action = {
             type: "macos_fs_search",
             query,
             scope: flagVal(filtered, "--scope"),
             limit: flagInt(filtered, "--limit") || 50,
           }
+          // --paths /a,/b,/c — multi-root search (only valid with --scope path).
+          // Repeating --paths is also accepted; entries are concatenated.
+          const pathsRaw = collectMulti(filtered, "--paths")
+          if (pathsRaw.length > 0) {
+            action.paths = pathsRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+          }
+          // --kinds public.folder,file — additive kind filter.
+          const kindsRaw = collectMulti(filtered, "--kinds")
+          if (kindsRaw.length > 0) {
+            action.kinds = kindsRaw.flatMap((s) => s.split(",")).map((s) => s.trim()).filter((s) => s.length > 0)
+          }
+          // --cwd /path — root for "cwd"/"workspace" scopes. If absent and the
+          // user passed scope=cwd/workspace, default to the CLI's working dir
+          // so the bridge sees something meaningful instead of falling back to home.
+          const cwdFlag = flagVal(filtered, "--cwd")
+          if (cwdFlag !== undefined) {
+            action.cwd = cwdFlag
+          } else if (action.scope === "cwd" || action.scope === "workspace") {
+            action.cwd = process.cwd()
+          }
+          return action
         }
         default:
           console.error(`error: unknown 'fs' subcommand '${fsSub}'. Use: read | write | search`)
@@ -1298,6 +1375,20 @@ function flagInt(args: string[], flag: string): number | undefined {
   if (val === undefined) return undefined
   const n = parseInt(val)
   return isNaN(n) ? undefined : n
+}
+
+// Collect every value that follows a repeated --flag occurrence.
+// `--paths /a --paths /b` and `--paths /a,/b` are both valid call sites; the
+// caller is expected to split commas after this returns the raw values.
+function collectMulti(args: string[], flag: string): string[] {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && args[i + 1] !== undefined) {
+      out.push(args[i + 1])
+      i += 1
+    }
+  }
+  return out
 }
 
 function collectPositionals(args: string[], startIndex: number, flagsWithValues = new Set<string>()): string[] {

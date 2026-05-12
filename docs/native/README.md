@@ -56,7 +56,7 @@ The bridge ships 43 domains across reads, drives, capture, networking, recording
 
 | Domain | CLI prefix | Purpose |
 |---|---|---|
-| Monitor | `interceptor macos monitor` | Record user interactions, export replay scripts |
+| Monitor | `interceptor macos monitor {start, stop, pause, resume, status, tail, list, export}` | Record native flows via per-PID `AXObserver` + `NSWorkspace` + `NSEvent` global monitor; persist NDJSON sessions; export `--plan` as a replayable `interceptor macos *` script. Optional sources via `--include clipboard\|files\|network\|log\|notifications\|speech` and co-recording via `--frames N [--vision-text]`. Accessibility TCC always required; Screen Recording / Microphone added when `--frames` / `--include speech` are used. |
 | Text | `interceptor macos text` | Read selection / visible / full text from frontmost app |
 | Compound | `interceptor macos {open, read, act, inspect}` | Single-call agent ergonomics |
 | **Overlay** | `interceptor macos overlay {start, stop, list, status, eval, ctl, verbs}` | Topmost transparent panels — particles (`CAEmitterLayer`), hardcoded Godzilla-vs-Kong (`SpriteKit`), dynamic scene-script (`SpriteKit`), HTML (`WKWebView`). Panic hotkey: `Ctrl+Opt+Cmd+Escape`. See [overlays.md](overlays.md). |
