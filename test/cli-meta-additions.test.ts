@@ -80,7 +80,7 @@ describe("helpForCommand (#51)", () => {
     const help = helpForCommand("act")
     expect(help).toBeDefined()
     expect(help).toContain("interceptor act <ref>")
-    expect(help).toContain("--os")
+    expect(help).toContain("--trusted")
   })
 
   test("returns null for an unknown command", () => {

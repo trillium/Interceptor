@@ -205,14 +205,11 @@ describe.skipIf(!IS_DARWIN)("release modes — dry-run", () => {
     expect(both).not.toMatch(/append appcast item/)
   })
 
-  test("Browser pkg stages the browser-surface skills only", () => {
+  test("Browser pkg stages the browser-surface skill only", () => {
     const { stdout, status } = runReleaseDryRun(["--browser-only"])
     expect(status).toBe(0)
 
-    // Browser daemon staging must include the two browser-surface skills.
-    expect(stdout).toContain(
-      ".agents/skills/interceptor /Volumes",
-    )
+    // Browser daemon staging must include the browser-surface skill.
     expect(stdout).toContain(
       ".agents/skills/interceptor-browser /Volumes",
     )
@@ -220,13 +217,10 @@ describe.skipIf(!IS_DARWIN)("release modes — dry-run", () => {
     expect(stdout).not.toContain(".agents/skills/interceptor-macos")
   })
 
-  test("Full pkg stages all three skills (browser two + macOS one)", () => {
+  test("Full pkg stages both the browser-surface and macOS skills", () => {
     const { stdout, status } = runReleaseDryRun(["--full"])
     expect(status).toBe(0)
 
-    expect(stdout).toContain(
-      ".agents/skills/interceptor /Volumes",
-    )
     expect(stdout).toContain(
       ".agents/skills/interceptor-browser /Volumes",
     )
