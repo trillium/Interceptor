@@ -641,14 +641,12 @@ function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: u
 }
 
 const extensionWsMap = new Map<string, { send: (data: string) => void }>()
-let lastRegisteredContextId: string | null = null
 let nativeRelaySocket: Bun.Socket<undefined> | null = null
 const wsOutboundQueues = new Map<string, string[]>()
 const WS_QUEUE_CAP = 50
 
 function resolveExtensionWs(contextId?: string): { send: (data: string) => void } | null {
   if (contextId) return extensionWsMap.get(contextId) ?? null
-  if (lastRegisteredContextId) return extensionWsMap.get(lastRegisteredContextId) ?? null
   if (extensionWsMap.size === 1) return [...extensionWsMap.values()][0]
   return null
 }
@@ -939,6 +937,27 @@ try {
             continue
           }
 
+          if (request.contextId && !extensionWsMap.has(request.contextId)) {
+            const available = [...extensionWsMap.keys()]
+            const hint = available.length > 0
+              ? ` (connected: ${available.join(", ")})`
+              : " (no extensions connected)"
+            socketWriteFramed(socket, JSON.stringify({
+              id,
+              result: { success: false, error: `context '${request.contextId}' not found${hint}` },
+            }))
+            continue
+          }
+
+          if (!request.contextId && extensionWsMap.size !== 1) {
+            const available = [...extensionWsMap.keys()]
+            const error = available.length === 0
+              ? "no extensions connected"
+              : `multiple extensions connected, use --context <id> (connected: ${available.join(", ")})`
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error } }))
+            continue
+          }
+
           const timer = setTimeout(() => {
             pendingRequests.delete(id)
             timedOutRequests.add(id)
@@ -1024,7 +1043,6 @@ try {
           }
           ;(ws as any).__contextId = ctxId
           extensionWsMap.set(ctxId, ws)
-          lastRegisteredContextId = ctxId
           log(`ws extension registered [context: ${ctxId}]`)
           drainWsOutboundQueue(ctxId)
           return
@@ -1075,9 +1093,6 @@ try {
         const ctxId = (ws as any).__contextId
         if (ctxId) {
           extensionWsMap.delete(ctxId)
-          if (lastRegisteredContextId === ctxId) {
-            lastRegisteredContextId = extensionWsMap.size > 0 ? [...extensionWsMap.keys()].at(-1)! : null
-          }
         }
         log(`ws client disconnected [context: ${ctxId ?? "unknown"}]`)
       }
