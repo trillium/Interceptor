@@ -217,6 +217,19 @@ The daemon talks to the extension via three channels, routed by [`daemon/outboun
 - **WebSocket** (`ws://localhost:19222`) — fallback / preferred for action requests
 - **Native relay** — secondary daemon instances become transparent stdin/stdout bridges to the singleton (eliminates the every-30-second native-host disconnect noise; introduced in [#28](https://github.com/Hacker-Valley-Media/interceptor/pull/28))
 
+#### Named contexts (multi-browser isolation)
+
+The daemon tracks all connected extensions in `extensionWsMap: Map<string, WebSocket>` rather than a single scalar. On first startup each extension generates a UUID and persists it in `chrome.storage.local` (unique per Chrome profile, survives MV3 service-worker restarts). The UUID is announced in every WebSocket registration message `{ type: "extension", contextId: "<uuid>" }`.
+
+CLI commands carry an optional `contextId` field in the IPC message. `sendNativeMessage` resolves the target WebSocket by:
+1. Exact `contextId` match from the map (when `--context <id>` is passed)
+2. `lastRegisteredContextId` fallback (backward compat — single-browser setups work unchanged)
+3. Any single connected extension (if the map has exactly one entry)
+
+Per-context outbound queues (`wsOutboundQueues: Map<string, string[]>`) replace the old global array; messages queued before the extension connects drain to the correct context on registration.
+
+`interceptor contexts` lists all connected context IDs. Use `--context <id>` on any command to route it to a specific profile.
+
 ### macOS bridge
 
 [`interceptor-bridge/`](interceptor-bridge/) is a Swift Package binary launched as a LaunchAgent. It exposes:

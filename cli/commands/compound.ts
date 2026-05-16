@@ -39,11 +39,11 @@ function truncateText(text: string, maxChars: number): string {
     `\n... (truncated: showed ${maxChars} of ${text.length} chars. Pass --full to see all, or 'read e<ref> --text-only' to scope, or 'find "<term>"' to jump.)`
 }
 
-async function send(action: Action, tabId?: number, useWs = false): Promise<Result> {
+async function send(action: Action, tabId?: number, useWs = false, contextId?: string): Promise<Result> {
   try {
     const resp = useWs
-      ? await sendCommandWs(action, tabId)
-      : await sendCommand(action, tabId)
+      ? await sendCommandWs(action, tabId, contextId)
+      : await sendCommand(action, tabId, contextId)
     return unwrap(resp)
   } catch (err) {
     return { success: false, error: (err as Error).message }
@@ -140,7 +140,8 @@ export async function runOpen(
   filtered: string[],
   globalTabId?: number,
   jsonMode = false,
-  useWs = false
+  useWs = false,
+  contextId?: string
 ): Promise<void> {
   const url = filtered[1]
   if (!url) {
@@ -158,7 +159,7 @@ export async function runOpen(
 
   // Step 1: Create tab (or reuse an existing managed one when --reuse is set)
   const createAction = buildTabCreateAction(filtered, url)
-  const createResult = await send(createAction, globalTabId, useWs)
+  const createResult = await send(createAction, globalTabId, useWs, contextId)
   if (!createResult.success) {
     output(jsonMode, { success: false, error: createResult.error || "failed to create tab" })
     return
@@ -177,7 +178,7 @@ export async function runOpen(
   let waitOk = false
   while (Date.now() < waitDeadline) {
     try {
-      const waitResult = await send({ type: "wait_stable", ms: 200, timeout: Math.min(3000, waitDeadline - Date.now()) }, tabId, useWs)
+      const waitResult = await send({ type: "wait_stable", ms: 200, timeout: Math.min(3000, waitDeadline - Date.now()) }, tabId, useWs, contextId)
       if (waitResult.success) { waitOk = true; break }
     } catch {}
     await Bun.sleep(500)
@@ -196,13 +197,13 @@ export async function runOpen(
   if (!textOnly) {
     treeResult = await send(
       { type: "get_a11y_tree", depth: 15, filter: "interactive", maxChars: 50000 },
-      tabId, useWs
+      tabId, useWs, contextId
     )
   }
 
   if (!treeOnly) {
     const textActionType: "extract_text" | "extract_markdown" = markdown ? "extract_markdown" : "extract_text"
-    textResult = await send({ type: textActionType }, tabId, useWs)
+    textResult = await send({ type: textActionType }, tabId, useWs, contextId)
   }
 
   const aggregate = aggregateReadResults({
@@ -254,7 +255,8 @@ export async function runRead(
   filtered: string[],
   globalTabId?: number,
   jsonMode = false,
-  useWs = false
+  useWs = false,
+  contextId?: string
 ): Promise<void> {
   const treeOnly = filtered.includes("--tree-only")
   const textOnly = filtered.includes("--text-only")
@@ -282,7 +284,7 @@ export async function runRead(
     if (includeFrames) {
       const framesResp = await send(
         buildReadTreeAction({ target, filterMode, includeStyle, includeFrames, treeFormat }),
-        globalTabId, useWs
+        globalTabId, useWs, contextId
       )
       if (framesResp.success && framesResp.data && typeof framesResp.data === "object" && Array.isArray((framesResp.data as { frames?: unknown[] }).frames)) {
         type FrameEntry = { frameId: number; parentFrameId: number; url: string; opaque?: true; error?: string; tree?: string }
@@ -307,14 +309,14 @@ export async function runRead(
     } else {
       treeResult = await send(
         buildReadTreeAction({ target, filterMode, includeStyle, includeFrames, treeFormat }),
-        globalTabId, useWs
+        globalTabId, useWs, contextId
       )
     }
   }
 
   if (!treeOnly) {
     const textAction: Action = { type: markdown ? "extract_markdown" : "extract_text", ...target }
-    textResult = await send(textAction, globalTabId, useWs)
+    textResult = await send(textAction, globalTabId, useWs, contextId)
   }
 
   const aggregate = aggregateReadResults({
@@ -359,7 +361,8 @@ export async function runAct(
   filtered: string[],
   globalTabId?: number,
   jsonMode = false,
-  useWs = false
+  useWs = false,
+  contextId?: string
 ): Promise<void> {
   const ref = filtered[1]
   if (!ref) {
@@ -399,36 +402,36 @@ export async function runAct(
       const keyParts = keys.split("+")
       const key = keyParts[keyParts.length - 1]
       const modifiers = keyParts.slice(0, -1)
-      actionResult = await send({ type: "os_key", key, modifiers }, globalTabId, useWs)
+      actionResult = await send({ type: "os_key", key, modifiers }, globalTabId, useWs, contextId)
     } else {
-      actionResult = await send({ type: "send_keys", keys }, globalTabId, useWs)
+      actionResult = await send({ type: "send_keys", keys }, globalTabId, useWs, contextId)
     }
   } else if (value !== undefined) {
     // Type
     if (useOs) {
-      actionResult = await send({ type: "os_type", ...target, text: value }, globalTabId, useWs)
+      actionResult = await send({ type: "os_type", ...target, text: value }, globalTabId, useWs, contextId)
     } else if (target.semantic) {
       actionResult = await send(
         { type: "find_and_type", name: target.semantic.name, role: target.semantic.role, inputText: value, clear: !append },
-        globalTabId, useWs
+        globalTabId, useWs, contextId
       )
     } else {
       actionResult = await send(
         { type: "input_text", ...target, text: value, clear: !append },
-        globalTabId, useWs
+        globalTabId, useWs, contextId
       )
     }
   } else {
     // Click
     if (useOs) {
-      actionResult = await send({ type: "os_click", ...target }, globalTabId, useWs)
+      actionResult = await send({ type: "os_click", ...target }, globalTabId, useWs, contextId)
     } else if (target.semantic) {
       actionResult = await send(
         { type: "find_and_click", name: target.semantic.name, role: target.semantic.role },
-        globalTabId, useWs
+        globalTabId, useWs, contextId
       )
     } else {
-      actionResult = await send({ type: "click", ...target }, globalTabId, useWs)
+      actionResult = await send({ type: "click", ...target }, globalTabId, useWs, contextId)
     }
   }
 
@@ -472,14 +475,14 @@ export async function runAct(
   let treeResult: Result = { success: false }
   let diffResult: Result = { success: false }
   try {
-    await send({ type: "wait_stable", ms: 200, timeout }, globalTabId, useWs)
+    await send({ type: "wait_stable", ms: 200, timeout }, globalTabId, useWs, contextId)
 
     // Step 3: Get updated tree + diff
     treeResult = await send(
       { type: "get_a11y_tree", depth: 15, filter: "interactive", maxChars: 50000 },
-      globalTabId, useWs
+      globalTabId, useWs, contextId
     )
-    diffResult = await send({ type: "diff" }, globalTabId, useWs)
+    diffResult = await send({ type: "diff" }, globalTabId, useWs, contextId)
   } catch {
     // Page likely navigated — action succeeded but post-read failed
     if (jsonMode) {
@@ -517,7 +520,8 @@ export async function runInspect(
   filtered: string[],
   globalTabId?: number,
   jsonMode = false,
-  useWs = false
+  useWs = false,
+  contextId?: string
 ): Promise<void> {
   const netOnly = filtered.includes("--net-only")
   const limitIdx = filtered.indexOf("--limit")
@@ -532,21 +536,21 @@ export async function runInspect(
   if (!netOnly) {
     const treeResult = await send(
       { type: "get_a11y_tree", depth: 15, filter: "interactive", maxChars: 50000 },
-      globalTabId, useWs
+      globalTabId, useWs, contextId
     )
     treeData = textData(treeResult)
 
-    const textResult = await send({ type: "extract_text" }, globalTabId, useWs)
+    const textResult = await send({ type: "extract_text" }, globalTabId, useWs, contextId)
     textContent = truncateText(textData(textResult), 2000)
   }
 
   const netLogResult = await send(
     { type: "net_log", filter: filterPattern, limit },
-    globalTabId, useWs
+    globalTabId, useWs, contextId
   )
   const netHeadersResult = await send(
     { type: "net_headers", filter: filterPattern },
-    globalTabId, useWs
+    globalTabId, useWs, contextId
   )
 
   const netLogData = textData(netLogResult)
@@ -606,13 +610,13 @@ function output(jsonMode: boolean, result: { success: boolean; error?: string; d
 export async function runCompoundCommand(
   cmd: string,
   filtered: string[],
-  opts: { jsonMode?: boolean; useWs?: boolean; globalTabId?: number; anyTab?: boolean }
+  opts: { jsonMode?: boolean; useWs?: boolean; globalTabId?: number; anyTab?: boolean; contextId?: string }
 ): Promise<void> {
   switch (cmd) {
-    case "open":    return runOpen(filtered, opts.globalTabId, opts.jsonMode, opts.useWs)
-    case "read":    return runRead(filtered, opts.globalTabId, opts.jsonMode, opts.useWs)
-    case "act":     return runAct(filtered, opts.globalTabId, opts.jsonMode, opts.useWs)
-    case "inspect":  return runInspect(filtered, opts.globalTabId, opts.jsonMode, opts.useWs)
+    case "open":    return runOpen(filtered, opts.globalTabId, opts.jsonMode, opts.useWs, opts.contextId)
+    case "read":    return runRead(filtered, opts.globalTabId, opts.jsonMode, opts.useWs, opts.contextId)
+    case "act":     return runAct(filtered, opts.globalTabId, opts.jsonMode, opts.useWs, opts.contextId)
+    case "inspect":  return runInspect(filtered, opts.globalTabId, opts.jsonMode, opts.useWs, opts.contextId)
     default:
       console.error(`error: unknown compound command '${cmd}'`)
       process.exit(1)

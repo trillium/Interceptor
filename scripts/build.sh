@@ -40,7 +40,16 @@ EOF
 
 restore_version() {
   git checkout cli/version.ts 2>/dev/null || true
-  git checkout extension/manifest.json 2>/dev/null || true
+  # Restore only the version field (not the whole file) so other local changes
+  # to the manifest (e.g. new keys) are preserved across builds.
+  if [[ -f extension/manifest.json ]]; then
+    local orig_version
+    orig_version=$(git show HEAD:extension/manifest.json 2>/dev/null | grep '"version"' | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+    if [[ -n "$orig_version" ]]; then
+      sed -i.bak -E 's|("version":[[:space:]]*)"[^"]+"|\1"'"$orig_version"'"|' extension/manifest.json
+      rm -f extension/manifest.json.bak
+    fi
+  fi
 }
 
 trap restore_version EXIT
@@ -56,8 +65,10 @@ build_extension() {
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser
   bun build extension/src/screenshot-runner.ts --outdir=extension/dist --target=browser
   bun build extension/src/offscreen.ts --outfile=extension/dist/offscreen.js --target=browser
+  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser
   cp extension/manifest.json extension/dist/
   cp extension/offscreen.html extension/dist/
+  cp extension/popup.html extension/dist/
   rm -rf extension/dist/icons
   cp -R extension/icons extension/dist/icons
   chmod 644 extension/dist/* 2>/dev/null || true

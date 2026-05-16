@@ -36,7 +36,7 @@ export type DaemonResponse = {
   result: DaemonResult
 }
 
-export function sendCommand(action: Action, tabId?: number): Promise<DaemonResponse> {
+export function sendCommand(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -57,7 +57,7 @@ export function sendCommand(action: Action, tabId?: number): Promise<DaemonRespo
     const socketHandlers: Bun.SocketHandler<undefined> = {
       open(socket: Bun.Socket<undefined>) {
         socketRef = socket
-        const payload = JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }) })
+        const payload = JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }), ...(contextId !== undefined && { contextId }) })
         const encoded = Buffer.from(payload, "utf-8")
         const header = Buffer.alloc(4)
         header.writeUInt32LE(encoded.byteLength, 0)
@@ -105,7 +105,7 @@ export function sendCommand(action: Action, tabId?: number): Promise<DaemonRespo
   })
 }
 
-export function sendCommandWs(action: Action, tabId?: number): Promise<DaemonResponse> {
+export function sendCommandWs(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -118,7 +118,7 @@ export function sendCommandWs(action: Action, tabId?: number): Promise<DaemonRes
 
     const ws = new WebSocket(`ws://localhost:${WS_PORT}`)
     ws.onopen = () => {
-      ws.send(JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }) }))
+      ws.send(JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }), ...(contextId !== undefined && { contextId }) }))
     }
     ws.onmessage = (event) => {
       clearTimeout(timer)

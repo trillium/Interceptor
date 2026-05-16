@@ -203,14 +203,23 @@ function stopWsKeepAlive(): void {
   wsKeepAliveTimer = null
 }
 
+async function getOrCreateContextId(): Promise<string> {
+  const stored = await chrome.storage.local.get("contextId") as { contextId?: string }
+  if (stored.contextId) return stored.contextId
+  const id = crypto.randomUUID()
+  await chrome.storage.local.set({ contextId: id })
+  return id
+}
+
 export function connectWsChannel(): void {
   if (wsChannel && (wsChannel.readyState === WebSocket.OPEN || wsChannel.readyState === WebSocket.CONNECTING)) return
   try {
     const ws = new WebSocket(WS_URL)
-    ws.onopen = () => {
+    ws.onopen = async () => {
       wsChannel = ws
       wsReady = true
-      ws.send(JSON.stringify({ type: "extension" }))
+      const contextId = await getOrCreateContextId()
+      ws.send(JSON.stringify({ type: "extension", contextId }))
       startWsKeepAlive()
       console.log("ws channel connected")
       if (activeTransport !== "native") {

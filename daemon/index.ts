@@ -640,25 +640,40 @@ function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: u
   }
 }
 
-let extensionWs: { send: (data: string) => void } | null = null
+const extensionWsMap = new Map<string, { send: (data: string) => void }>()
+let lastRegisteredContextId: string | null = null
 let nativeRelaySocket: Bun.Socket<undefined> | null = null
-const wsOutboundQueue: string[] = []
+const wsOutboundQueues = new Map<string, string[]>()
 const WS_QUEUE_CAP = 50
 
-function drainWsOutboundQueue(): void {
-  if (!extensionWs) return
-  while (wsOutboundQueue.length > 0) {
-    const msg = wsOutboundQueue.shift()!
-    log(`draining queued ws message: ${msg.slice(0, 100)}`)
-    try { extensionWs.send(msg) } catch (err) { log(`ws drain error: ${(err as Error).message}`) }
+function resolveExtensionWs(contextId?: string): { send: (data: string) => void } | null {
+  if (contextId) return extensionWsMap.get(contextId) ?? null
+  if (lastRegisteredContextId) return extensionWsMap.get(lastRegisteredContextId) ?? null
+  if (extensionWsMap.size === 1) return [...extensionWsMap.values()][0]
+  return null
+}
+
+function drainWsOutboundQueue(ctxId: string): void {
+  const ws = extensionWsMap.get(ctxId)
+  if (!ws) return
+  for (const key of [ctxId, "default"]) {
+    const queue = wsOutboundQueues.get(key)
+    if (!queue) continue
+    while (queue.length > 0) {
+      const msg = queue.shift()!
+      log(`draining queued ws message [${key}]: ${msg.slice(0, 100)}`)
+      try { ws.send(msg) } catch (err) { log(`ws drain error: ${(err as Error).message}`) }
+    }
+    wsOutboundQueues.delete(key)
   }
 }
 
-function sendNativeMessage(msg: unknown): void {
+function sendNativeMessage(msg: unknown, contextId?: string): void {
   const json = JSON.stringify(msg)
+  const resolvedWs = resolveExtensionWs(contextId)
   const preferred = chooseOutboundTransport(msg, {
     nativeRelayAvailable: !!nativeRelaySocket,
-    extensionWsAvailable: !!extensionWs,
+    extensionWsAvailable: !!resolvedWs,
     stdinAlive,
     standalone: STANDALONE
   })
@@ -675,10 +690,10 @@ function sendNativeMessage(msg: unknown): void {
     return true
   }
 
-  if (preferred === "ws" && extensionWs) {
+  if (preferred === "ws" && resolvedWs) {
     log(`forwarding via ws: ${json.slice(0, 200)}`)
     try {
-      extensionWs.send(json)
+      resolvedWs.send(json)
       return
     } catch (err) {
       log(`ws send error: ${(err as Error).message}`)
@@ -708,10 +723,10 @@ function sendNativeMessage(msg: unknown): void {
     return
   }
 
-  if (extensionWs) {
+  if (resolvedWs) {
     log(`fallback via ws: ${json.slice(0, 200)}`)
     try {
-      extensionWs.send(json)
+      resolvedWs.send(json)
       return
     } catch (err) {
       log(`fallback ws send error: ${(err as Error).message}`)
@@ -741,9 +756,12 @@ function sendNativeMessage(msg: unknown): void {
     return
   }
 
-  if (wsOutboundQueue.length >= WS_QUEUE_CAP) wsOutboundQueue.shift()
-  wsOutboundQueue.push(json)
-  log(`queued for ws (${wsOutboundQueue.length} pending): ${json.slice(0, 100)}`)
+  const queueKey = contextId ?? "default"
+  if (!wsOutboundQueues.has(queueKey)) wsOutboundQueues.set(queueKey, [])
+  const queue = wsOutboundQueues.get(queueKey)!
+  if (queue.length >= WS_QUEUE_CAP) queue.shift()
+  queue.push(json)
+  log(`queued for ws [${queueKey}] (${queue.length} pending): ${json.slice(0, 100)}`)
 }
 
 let stdinAlive = !STANDALONE
@@ -856,7 +874,7 @@ try {
           const jsonBuf = buf.subarray(4, 4 + msgLen)
           buf = buf.subarray(4 + msgLen)
 
-          let request: { id?: string; action?: unknown; tabId?: number; type?: string }
+          let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string }
           try {
             request = JSON.parse(jsonBuf.toString("utf-8"))
           } catch {
@@ -883,6 +901,12 @@ try {
           const actionType = action?.type || "unknown"
           log(`cli request: ${id} ${JSON.stringify(request.action).slice(0, 100)}`)
           emitEvent("request_received", { requestId: id, action: actionType })
+
+          if (action?.type === "contexts") {
+            const list = [...extensionWsMap.keys()]
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: list } }))
+            continue
+          }
 
           if (action?.type?.startsWith("os_") && action.windowBounds && action.pageX !== undefined) {
             handleOsAction(id, action).then((osResult) => {
@@ -934,7 +958,7 @@ try {
             actionType
           })
 
-          sendNativeMessage({ id, action: request.action, tabId: request.tabId })
+          sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
         }
 
         socketBuffers.set(socket, buf)
@@ -984,7 +1008,7 @@ try {
       message(ws, raw) {
         const rawStr = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf-8")
         log(`ws recv: ${rawStr.slice(0, 300)}`)
-        let request: { id?: string; action?: unknown; tabId?: number; type?: string; result?: unknown }
+        let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string; result?: unknown }
         try {
           request = JSON.parse(rawStr)
         } catch {
@@ -993,10 +1017,12 @@ try {
         }
 
         if (request.type === "extension") {
-          (ws as any).__isExtension = true
-          extensionWs = ws
-          log("ws extension channel registered")
-          drainWsOutboundQueue()
+          const ctxId = request.contextId ?? "default"
+          ;(ws as any).__contextId = ctxId
+          extensionWsMap.set(ctxId, ws)
+          lastRegisteredContextId = ctxId
+          log(`ws extension registered [context: ${ctxId}]`)
+          drainWsOutboundQueue(ctxId)
           return
         }
 
@@ -1039,11 +1065,17 @@ try {
           actionType
         })
 
-        sendNativeMessage({ id, action: request.action, tabId: request.tabId })
+        sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
       },
       close(ws) {
-        if ((ws as any).__isExtension) extensionWs = null
-        log("ws client disconnected")
+        const ctxId = (ws as any).__contextId
+        if (ctxId) {
+          extensionWsMap.delete(ctxId)
+          if (lastRegisteredContextId === ctxId) {
+            lastRegisteredContextId = extensionWsMap.size > 0 ? [...extensionWsMap.keys()].at(-1)! : null
+          }
+        }
+        log(`ws client disconnected [context: ${ctxId ?? "unknown"}]`)
       }
     }
   })

@@ -25,6 +25,7 @@ export const HELP = `interceptor — browser control CLI
 Flags:
   -V, --version                       Print version, build SHA, and build date
   --json                              Output as JSON
+  --context <id>                      Target a specific browser context (see: interceptor contexts)
 
 Compound (agent-optimized):
   interceptor open <url>                     Open URL in a background tab (default), wait, return tree + text
@@ -223,6 +224,7 @@ Recording (Session Monitor):
     --with-bodies                        (P1) Merge cached response bodies
 
 Meta:
+  interceptor contexts                       List IDs of all connected browser contexts (use with --context)
   interceptor init                           First-run preflight: verify daemon, bridge, and extension are reachable
   interceptor init --verbose                 Same as 'init', plus a per-component reachability breakdown
   interceptor status                         Check daemon status (local — no connection needed)

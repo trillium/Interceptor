@@ -183,6 +183,19 @@ interceptor raw '{"type":"any_action","key":"value"}'
 
 `raw` sends any action verbatim — prefer named commands first.
 
+## Contexts (multi-browser isolation)
+
+```bash
+interceptor contexts                                # List IDs of all connected browser contexts
+interceptor --context <id> read <url>               # Route command to a specific profile
+interceptor --context <id> open <url>
+interceptor --context <id> act e7 "value"
+```
+
+Each browser profile auto-generates a stable UUID on first run (stored in `chrome.storage.local`). `contexts` lists all currently connected IDs. Without `--context`, commands go to the most-recently connected extension — backward-compatible with single-browser setups.
+
+Primary use case: two Chrome profiles logged in to different accounts simultaneously (cross-account security testing, multi-tenant verification).
+
 ## Capabilities + Reload
 
 ```bash

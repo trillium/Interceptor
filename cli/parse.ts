@@ -31,3 +31,13 @@ export function parseTabFlag(args: string[]): number | undefined {
   }
   return tabId
 }
+
+export function parseContextFlag(args: string[]): string | undefined {
+  const idx = args.indexOf("--context")
+  if (idx === -1) return undefined
+  if (!args[idx + 1] || args[idx + 1].startsWith("--")) {
+    console.error("error: --context requires a context ID")
+    process.exit(1)
+  }
+  return args[idx + 1]
+}
