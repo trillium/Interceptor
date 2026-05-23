@@ -1,5 +1,5 @@
 import { HELP, helpForCommand } from "./help"
-import { parseTabFlag } from "./parse"
+import { parseTabFlag, parseContextFlag } from "./parse"
 import { formatState, formatTabs, formatCookies, formatResult } from "./format"
 import { sendCommand, sendCommandWs, type DaemonResult, type DaemonResponse } from "./transport"
 import { fromPassive, writeExport, type PassiveNetEntry, type ExportFormat } from "../shared/exports"
@@ -23,6 +23,7 @@ import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
 import { VERSION, BUILD_SHA, BUILD_DATE } from "./version"
+import { buildFilteredArgs } from "./global-flags"
 
 // Command → module routing
 const STATE_CMDS = new Set(["state", "tree", "diff", "find", "text", "html"])
@@ -56,7 +57,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS,
-  "help",
+  "help", "contexts",
 ])
 
 // Monitor subcommands that are handled locally (no daemon needed)
@@ -78,6 +79,7 @@ async function main() {
   const useWs = args.includes("--ws") || (isScreenshotCmd && !args.includes("--no-ws"))
   const anyTab = args.includes("--any-tab")
   const globalTabId = parseTabFlag(args)
+  const globalContextId = parseContextFlag(args)
 
   // Build filtered args (strip global flags). NB: --json is dual-purpose —
   // it can be a global "emit JSON output" boolean OR a domain-specific
@@ -85,14 +87,7 @@ async function main() {
   // by position: `--json` at index 0 or 1 is the global boolean (it's
   // always near the front, like `interceptor --json status`); deeper
   // occurrences are always domain value flags consumed by the parser.
-  const tabIdx = args.indexOf("--tab")
-  const tabFilterSet = new Set(["--ws", "--any-tab"])
-  if (tabIdx !== -1) { tabFilterSet.add("--tab"); if (args[tabIdx + 1]) tabFilterSet.add(args[tabIdx + 1]) }
-  const filtered = args.filter((a, i) => {
-    if (tabFilterSet.has(a)) return false
-    if (a === "--json") return i > 1
-    return true
-  })
+  const filtered = buildFilteredArgs(args)
 
   if (filtered.length === 0 || filtered[0] === "help") {
     console.log(HELP)
@@ -161,13 +156,36 @@ async function main() {
     return
   }
 
+  if (cmd === "contexts") {
+    try {
+      const response = await sendCommand({ type: "contexts" }, undefined, undefined)
+      const result = response.result
+      if (!result.success) {
+        console.error(`error: ${result.error || "failed to list browser contexts"}`)
+        process.exit(1)
+      }
+      const ids = Array.isArray(result.data) ? result.data as string[] : []
+      if (jsonMode) {
+        console.log(JSON.stringify(ids))
+      } else if (ids.length === 0) {
+        console.log("no browser contexts connected")
+      } else {
+        ids.forEach(id => console.log(id))
+      }
+    } catch (err) {
+      console.error(`error: ${(err as Error).message}`)
+      process.exit(1)
+    }
+    return
+  }
+
   if (COMPOUND_CMDS.has(cmd)) {
-    await runCompoundCommand(cmd, filtered, { jsonMode, useWs, globalTabId, anyTab })
+    await runCompoundCommand(cmd, filtered, { jsonMode, useWs, globalTabId, anyTab, contextId: globalContextId })
     return
   }
 
   if (OVERRIDE_CMDS.has(cmd)) {
-    await runOverride(filtered, { jsonMode, useWs, globalTabId })
+    await runOverride(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
     return
   }
 
@@ -205,8 +223,8 @@ async function main() {
       try {
         const chunkAction = { type: "sse_chunk", filter, since: offset }
         const resp = useWs
-          ? await sendCommandWs(chunkAction, globalTabId)
-          : await sendCommand(chunkAction, globalTabId)
+          ? await sendCommandWs(chunkAction, globalTabId, globalContextId)
+          : await sendCommand(chunkAction, globalTabId, globalContextId)
         const result = unwrapResult(resp)
         if (result?.success && result.data) {
           const d = result.data as { active: boolean; text?: string; offset?: number }
@@ -236,8 +254,8 @@ async function main() {
 
   try {
     const response = useWs
-      ? await sendCommandWs(action, globalTabId)
-      : await sendCommand(action, globalTabId)
+      ? await sendCommandWs(action, globalTabId, globalContextId)
+      : await sendCommand(action, globalTabId, globalContextId)
     const result = unwrapResult(response)
 
     // Screenshot save-to-disk post-processing

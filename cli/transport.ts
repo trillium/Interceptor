@@ -6,10 +6,9 @@ import { IPC_PORT, IS_WIN, SOCKET_PATH, WS_PORT } from "../shared/platform"
 
 export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT || "15000")
 
-// PRD-63 Spec 5: per-verb timeout overrides. SFSpeechRecognizer's
-// requestAuthorization is async and user-bounded — Apple does not place a
-// time bound on the consent prompt, so 15s is too short for first-time
-// `listen start` / `vad start`. 60s covers the documented user-prompt UX.
+// Speech permission prompts are async and user-bounded; 15s is too short
+// for first-time `listen start` / `vad start`. 60s covers the documented
+// user-prompt UX while preserving the normal timeout for other verbs.
 const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   macos_listen: 60_000,
   macos_vad: 60_000,
@@ -19,8 +18,8 @@ function pickTimeoutForAction(actionType: string): number {
   return ACTION_TIMEOUT_OVERRIDES_MS[actionType] ?? INTERCEPTOR_TIMEOUT_MS
 }
 
-// PRD-63 Spec 5: branch the timeout hint on `macos_*` so bridge commands
-// don't get a Chrome/Brave-extension troubleshooting hint.
+// Branch the timeout hint on `macos_*` so bridge commands don't get a
+// Chrome/Brave-extension troubleshooting hint.
 function timeoutMessage(actionType: string, ms: number): string {
   const seconds = Math.round(ms / 1000)
   if (actionType.startsWith("macos_")) {
@@ -36,7 +35,7 @@ export type DaemonResponse = {
   result: DaemonResult
 }
 
-export function sendCommand(action: Action, tabId?: number): Promise<DaemonResponse> {
+export function sendCommand(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -57,7 +56,7 @@ export function sendCommand(action: Action, tabId?: number): Promise<DaemonRespo
     const socketHandlers: Bun.SocketHandler<undefined> = {
       open(socket: Bun.Socket<undefined>) {
         socketRef = socket
-        const payload = JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }) })
+        const payload = JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }), ...(contextId !== undefined && { contextId }) })
         const encoded = Buffer.from(payload, "utf-8")
         const header = Buffer.alloc(4)
         header.writeUInt32LE(encoded.byteLength, 0)
@@ -105,7 +104,7 @@ export function sendCommand(action: Action, tabId?: number): Promise<DaemonRespo
   })
 }
 
-export function sendCommandWs(action: Action, tabId?: number): Promise<DaemonResponse> {
+export function sendCommandWs(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -118,7 +117,7 @@ export function sendCommandWs(action: Action, tabId?: number): Promise<DaemonRes
 
     const ws = new WebSocket(`ws://localhost:${WS_PORT}`)
     ws.onopen = () => {
-      ws.send(JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }) }))
+      ws.send(JSON.stringify({ id, action, ...(tabId !== undefined && { tabId }), ...(contextId !== undefined && { contextId }) }))
     }
     ws.onmessage = (event) => {
       clearTimeout(timer)

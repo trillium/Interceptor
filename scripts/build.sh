@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 TARGET="host"
 BUILD_ALL=0
+ORIG_MANIFEST_VERSION=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -29,10 +30,13 @@ export const BUILD_DATE = "$date"
 EOF
   # Keep extension/manifest.json#version in lockstep with package.json so the
   # extension reports the same version as the CLI / pkg / Sparkle artifacts.
-  # Source manifest is restored via `git checkout` after build (same shape as
-  # cli/version.ts). Without this, the manifest is whatever someone hand-bumped
-  # last and silently drifts every release that forgets to bump it.
+  # Source manifest is restored after build. Without this, the manifest is
+  # whatever someone hand-bumped last and silently drifts every release that
+  # forgets to bump it.
   if [[ -f extension/manifest.json ]]; then
+    if [[ -z "$ORIG_MANIFEST_VERSION" ]]; then
+      ORIG_MANIFEST_VERSION=$(grep '"version"' extension/manifest.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+    fi
     sed -i.bak -E 's|("version":[[:space:]]*)"[^"]+"|\1"'"$pkg_version"'"|' extension/manifest.json
     rm -f extension/manifest.json.bak
   fi
@@ -40,7 +44,18 @@ EOF
 
 restore_version() {
   git checkout cli/version.ts 2>/dev/null || true
-  git checkout extension/manifest.json 2>/dev/null || true
+  # Restore only the version field (not the whole file) so other local changes
+  # to the manifest (e.g. new keys) are preserved across builds.
+  if [[ -f extension/manifest.json ]]; then
+    local orig_version="$ORIG_MANIFEST_VERSION"
+    if [[ -z "$orig_version" ]]; then
+      orig_version=$(git show HEAD:extension/manifest.json 2>/dev/null | grep '"version"' | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+    fi
+    if [[ -n "$orig_version" ]]; then
+      sed -i.bak -E 's|("version":[[:space:]]*)"[^"]+"|\1"'"$orig_version"'"|' extension/manifest.json
+      rm -f extension/manifest.json.bak
+    fi
+  fi
 }
 
 trap restore_version EXIT
@@ -56,8 +71,10 @@ build_extension() {
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser
   bun build extension/src/screenshot-runner.ts --outdir=extension/dist --target=browser
   bun build extension/src/offscreen.ts --outfile=extension/dist/offscreen.js --target=browser
+  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser
   cp extension/manifest.json extension/dist/
   cp extension/offscreen.html extension/dist/
+  cp extension/popup.html extension/dist/
   rm -rf extension/dist/icons
   cp -R extension/icons extension/dist/icons
   chmod 644 extension/dist/* 2>/dev/null || true
