@@ -66,6 +66,7 @@ build_extension() {
   rm -rf extension/dist
   mkdir -p extension/dist
   bun build extension/src/background.ts --outdir=extension/dist --target=browser
+  bun build extension/src/net-buffer-content.ts --outdir=extension/dist --target=browser
   bun build extension/src/content.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-net.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser

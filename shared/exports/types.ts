@@ -12,7 +12,7 @@
 
 export type ExportFormat = "text" | "json" | "har" | "pcapng" | "plan"
 
-export type CaptureSource = "fetch" | "xhr" | "sse" | "cdp" | "monitor"
+export type CaptureSource = "fetch" | "xhr" | "sse" | "ws" | "beacon" | "broadcast" | "cdp" | "monitor"
 
 /**
  * UnifiedCapture is the single input shape every encoder consumes. It's
@@ -42,6 +42,14 @@ export type UnifiedCapture = {
   tabId?: number
   seq?: number
   bodyBytes?: number             // monitor artifacts store byte count even when body preview was trimmed
+  event?: string
+  direction?: string
+  payloadKind?: string
+  payloadEncoding?: string
+  socketId?: string
+  channelId?: string
+  channelName?: string
+  returnValue?: boolean
 }
 
 /**
@@ -93,6 +101,16 @@ export type InterceptorEntry = {
   cause?: { idx: number; ref?: string; role?: string; name?: string }
   tabId?: number
   seq?: number
+  pageCommunication?: {
+    event?: string
+    direction?: string
+    payloadKind?: string
+    payloadEncoding?: string
+    socketId?: string
+    channelId?: string
+    channelName?: string
+    returnValue?: boolean
+  }
 }
 
 /**

@@ -61,6 +61,7 @@ Passive network (preferred over CDP):
 
 ```bash
 interceptor net log [--filter <p>] [--since 30s] [--limit 100]
+interceptor net log --format json|har|pcapng [--out <path>]
 interceptor net headers [--filter <p>]
 interceptor net clear
 ```
@@ -86,6 +87,19 @@ SSE:
 ```bash
 interceptor sse streams | log | tail
 ```
+
+Page communication (WebSocket / Beacon / BroadcastChannel, no CDP):
+
+```bash
+interceptor net page-comm log [--type ws|beacon|broadcast] [--filter <text>] [--limit 100]
+interceptor net page-comm clear
+interceptor net monitor on [--reload] [--filter "https://example.com/*"]
+interceptor net monitor status
+interceptor net monitor off
+```
+
+Use `net monitor on --reload` when the WebSocket or BroadcastChannel is created
+during page startup. For mechanics and limits, see `page-communication-capture.md`.
 
 ## Canvas
 

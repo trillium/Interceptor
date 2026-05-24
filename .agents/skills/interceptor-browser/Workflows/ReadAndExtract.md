@@ -94,7 +94,8 @@ Fix in one command:
 Only when no built-in surface exposes what you need. Examples that justify it:
 - Reading a specific deeply-nested object on `window`
 - Calling a page function (e.g. `window.dataLayer.push`)
-- Sniffing a WebSocket frame (MAIN-world patch)
+- Reading ad hoc page state that is not exposed through DOM, network, scene, or
+  page-communication capture
 
 On strict-CSP sites, the first `eval --main` may trigger an automatic reload/retry path. Expect that on the first attempt against a CSP-locked page.
 

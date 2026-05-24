@@ -11,6 +11,8 @@ interceptor monitor export <session-id> --plan
 
 - Use monitor when the goal is to learn a human web workflow and replay it later.
 - Treat `--plan` output as the highest-value artifact. It converts event traces into reusable `interceptor ...` commands.
+- Add `--capture page-comm` when WebSocket, Beacon, or BroadcastChannel rows
+  must be preserved in the session; add `--reload` when startup sockets matter.
 
 ## Understand session behavior
 

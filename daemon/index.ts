@@ -346,9 +346,14 @@ function syncSessionMetaFromEvent(ev: MonitorEvent): void {
 
 function persistNetArtifactFromEvent(ev: Record<string, unknown>): void {
   if (typeof ev.sid !== "string") return
-  const kind = ev.event
-  if (kind !== "fetch" && kind !== "xhr" && kind !== "sse") return
-  if (typeof ev.bp !== "string" || !ev.bp) return
+  const event = typeof ev.event === "string" ? ev.event : ""
+  let kind: "fetch" | "xhr" | "sse" | "ws" | "beacon" | "broadcast" | undefined
+  if (event === "fetch" || event === "xhr" || event === "sse") kind = event
+  else if (event.startsWith("ws_")) kind = "ws"
+  else if (event === "beacon" || event === "beacon_error") kind = "beacon"
+  else if (event.startsWith("broadcast_")) kind = "broadcast"
+  if (!kind) return
+  if ((kind === "fetch" || kind === "xhr" || kind === "sse") && (typeof ev.bp !== "string" || !ev.bp)) return
 
   appendSessionNetArtifact(ev.sid, {
     sid: ev.sid,
@@ -363,7 +368,14 @@ function persistNetArtifactFromEvent(ev: Record<string, unknown>): void {
     contentType: typeof ev.ct === "string" ? ev.ct : undefined,
     truncated: ev.trn === true,
     bodyBytes: typeof ev.bt === "number" ? ev.bt : undefined,
-    bodyPreview: ev.bp
+    bodyPreview: typeof ev.bp === "string" ? ev.bp : "",
+    direction: typeof ev.dir === "string" ? ev.dir : undefined,
+    payloadKind: typeof ev.pk === "string" ? ev.pk : undefined,
+    payloadEncoding: typeof ev.enc === "string" ? ev.enc : undefined,
+    socketId: typeof ev.skt === "string" ? ev.skt : undefined,
+    channelId: typeof ev.ch === "string" ? ev.ch : undefined,
+    channelName: typeof ev.cn === "string" ? ev.cn : undefined,
+    returnValue: typeof ev.rv === "boolean" ? ev.rv : undefined
   })
 }
 

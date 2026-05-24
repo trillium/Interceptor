@@ -121,7 +121,11 @@ function emitMonEvent(
   const seq = nextSeq(session)
   session.counts.evt++
   if (kind === "mut") session.counts.mut++
-  else if (kind === "fetch" || kind === "xhr" || kind === "sse") session.counts.net++
+  else if (
+    kind === "fetch" || kind === "xhr" || kind === "sse" ||
+    kind.startsWith("ws_") || kind === "beacon" || kind === "beacon_error" ||
+    kind.startsWith("broadcast_")
+  ) session.counts.net++
   else if (kind === "nav") session.counts.nav++
 
   const attachment = attachmentOverride || getCurrentAttachment(session)
@@ -776,7 +780,31 @@ export async function handleMonitorActions(
         ...(session.url ? { u: session.url } : {})
       }, initialAttachment)
 
-      return { success: true, data: { sessionId, tabId: resolvedTabId, startedAt, url: session.url, instruction } }
+      const capture = typeof action.capture === "string" ? action.capture : undefined
+      const shouldReload = action.reload === true
+      if (capture === "page-comm" && shouldReload) {
+        try {
+          await chrome.tabs.reload(resolvedTabId)
+        } catch (err) {
+          return { success: false, error: `monitor started but reload failed: ${(err as Error).message}`, tabId: resolvedTabId }
+        }
+      }
+
+      return {
+        success: true,
+        data: {
+          sessionId,
+          tabId: resolvedTabId,
+          startedAt,
+          url: session.url,
+          instruction,
+          ...(capture ? { capture } : {}),
+          ...(shouldReload ? { reload: true, mode: "from-start" } : {}),
+          ...(capture === "page-comm" && !shouldReload
+            ? { note: "page-comm attach-now captures future WebSocket, Beacon, and BroadcastChannel activity; existing WebSocket instances are not retroactively captured" }
+            : {})
+        }
+      }
     }
 
     case "monitor_stop": {

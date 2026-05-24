@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { fromPassive, fromMonitorArtifacts, type PassiveNetEntry } from "../shared/exports/unify"
+import { fromPassive, fromMonitorArtifacts, fromMonitorEvents, type PassiveNetEntry } from "../shared/exports/unify"
 import type { MonitorNetArtifact } from "../shared/monitor-artifacts"
 
 describe("fromPassive — PassiveNetEntry[] → UnifiedCapture[]", () => {
@@ -96,8 +96,8 @@ describe("fromMonitorArtifacts — MonitorNetArtifact[] → UnifiedCapture[]", (
 
   const out = fromMonitorArtifacts(artifacts)
 
-  test("source is always 'monitor'", () => {
-    expect(out[0].source).toBe("monitor")
+  test("source follows the persisted artifact kind", () => {
+    expect(out[0].source).toBe("fetch")
   })
 
   test("cause / tabId / seq / bodyBytes flow through", () => {
@@ -109,5 +109,63 @@ describe("fromMonitorArtifacts — MonitorNetArtifact[] → UnifiedCapture[]", (
 
   test("responseBody comes from bodyPreview", () => {
     expect(out[0].responseBody).toBe('{"ok":true}')
+  })
+})
+
+describe("fromMonitorEvents — page communication events", () => {
+  const out = fromMonitorEvents([
+    {
+      event: "ws_send",
+      sid: "session-1",
+      s: 6,
+      t: 1_700_000_000_000,
+      tid: 42,
+      u: "wss://example.com/socket",
+      dir: "send",
+      pk: "string",
+      bp: "hello",
+      bt: 5,
+      skt: "ws-1",
+      trn: false,
+    },
+    {
+      event: "beacon",
+      sid: "session-1",
+      s: 7,
+      t: 1_700_000_000_001,
+      tid: 42,
+      u: "https://example.com/beacon",
+      pk: "string",
+      bp: "ok",
+      bt: 2,
+      rv: true,
+    },
+    {
+      event: "broadcast_message",
+      sid: "session-1",
+      s: 8,
+      t: 1_700_000_000_002,
+      tid: 42,
+      cn: "updates",
+      ch: "bc-1",
+      dir: "receive",
+      pk: "object",
+      bp: "{\"x\":1}",
+      bt: 7,
+    },
+  ])
+
+  test("sources map to ws, beacon, and broadcast", () => {
+    expect(out.map((entry) => entry.source)).toEqual(["ws", "beacon", "broadcast"])
+  })
+
+  test("page communication metadata survives normalization", () => {
+    expect(out[0].event).toBe("ws_send")
+    expect(out[0].direction).toBe("send")
+    expect(out[0].socketId).toBe("ws-1")
+    expect(out[1].method).toBe("POST")
+    expect(out[1].returnValue).toBe(true)
+    expect(out[2].method).toBe("BROADCAST")
+    expect(out[2].channelName).toBe("updates")
   })
 })

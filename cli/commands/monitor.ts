@@ -62,7 +62,27 @@ interface MonEvent {
   dur?: number
   reason?: string
   fid?: number
+  dir?: string
+  pk?: string
+  bp?: string
+  bt?: number
+  enc?: string
+  skt?: string
+  ch?: string
+  cn?: string
+  rv?: boolean
   [key: string]: unknown
+}
+
+function isMonitorNetEvent(eventName: unknown): boolean {
+  if (typeof eventName !== "string") return false
+  return eventName === "fetch" ||
+    eventName === "xhr" ||
+    eventName === "sse" ||
+    eventName.startsWith("ws_") ||
+    eventName === "beacon" ||
+    eventName === "beacon_error" ||
+    eventName.startsWith("broadcast_")
 }
 
 function flagValue(args: string[], flag: string): string | undefined {
@@ -92,10 +112,45 @@ function readGlobalMonEvents(filterSid?: string): MonEvent[] {
   return out
 }
 
+function monitorEventKey(ev: MonEvent): string {
+  return [
+    ev.event || "",
+    ev.sid || "",
+    ev.s ?? "",
+    ev.t ?? "",
+    ev.tid ?? "",
+    ev.doc || "",
+    ev.u || ev.url || "",
+  ].join("|")
+}
+
+function mergeMonEvents(primary: MonEvent[], secondary: MonEvent[]): MonEvent[] {
+  if (primary.length === 0) return secondary
+  if (secondary.length === 0) return primary
+  const seen = new Set<string>()
+  const merged: MonEvent[] = []
+  for (const ev of [...primary, ...secondary]) {
+    const key = monitorEventKey(ev)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(ev)
+  }
+  return merged.sort((a, b) => {
+    const at = typeof a.t === "number" ? a.t : Date.parse(a.timestamp || "")
+    const bt = typeof b.t === "number" ? b.t : Date.parse(b.timestamp || "")
+    return (Number.isFinite(at) ? at : 0) - (Number.isFinite(bt) ? bt : 0)
+  })
+}
+
 export function readMonEvents(filterSid?: string): MonEvent[] {
   if (filterSid && hasSessionArtifacts(filterSid)) {
     const sessionEvents = readSessionEvents(filterSid) as MonEvent[]
-    if (sessionEvents.length > 0) return sessionEvents
+    if (sessionEvents.length > 0) {
+      const sessionEventNames = new Set(sessionEvents.map((ev) => ev.event).filter(Boolean))
+      const missingEventFamilies = readGlobalMonEvents(filterSid)
+        .filter((ev) => ev.event && !sessionEventNames.has(ev.event))
+      return mergeMonEvents(sessionEvents, missingEventFamilies)
+    }
   }
   return readGlobalMonEvents(filterSid)
 }
@@ -117,7 +172,7 @@ function summarizeEvents(
   for (const ev of events) {
     evtCount += 1
     if (ev.event === "mut") mutCount += 1
-    if (ev.event === "fetch" || ev.event === "xhr" || ev.event === "sse") netCount += 1
+    if (isMonitorNetEvent(ev.event)) netCount += 1
   }
   return {
     sid,
@@ -242,6 +297,31 @@ export function renderEvent(ev: MonEvent, base: number): string {
       const u = ev.u ? shortUrl(ev.u) : "?"
       const sz = ev.bz ? `${(ev.bz / 1024).toFixed(1)}kB` : ""
       return `  ${rel}  ${k}  SSE ${u} ${sz}  ${cause}`
+    }
+    case "ws_opening":
+    case "ws_open":
+    case "ws_send":
+    case "ws_message":
+    case "ws_error":
+    case "ws_close": {
+      const u = ev.u ? shortUrl(ev.u) : "?"
+      const payload = ev.pk ? ` ${ev.pk}${ev.bt !== undefined ? ` ${ev.bt}B` : ""}` : ""
+      return `  ${rel}  ${k}  ${ev.dir || ""} ${u}${payload}${ev.skt ? `  ${ev.skt}` : ""}`
+    }
+    case "beacon":
+    case "beacon_error": {
+      const u = ev.u ? shortUrl(ev.u) : "?"
+      const payload = ev.pk ? ` ${ev.pk}${ev.bt !== undefined ? ` ${ev.bt}B` : ""}` : ""
+      const rv = ev.rv !== undefined ? ` return=${ev.rv}` : ""
+      return `  ${rel}  ${k}  POST ${u}${payload}${rv}`
+    }
+    case "broadcast_open":
+    case "broadcast_send":
+    case "broadcast_message":
+    case "broadcast_error":
+    case "broadcast_close": {
+      const payload = ev.pk ? ` ${ev.pk}${ev.bt !== undefined ? ` ${ev.bt}B` : ""}` : ""
+      return `  ${rel}  ${k}  ${ev.dir || ""} ${ev.cn || "?"}${payload}${ev.ch ? `  ${ev.ch}` : ""}`
     }
     case "nav": {
       const cause = ev.cause !== undefined ? `(cause: #${ev.cause})` : ""
@@ -395,7 +475,7 @@ export function renderSession(sid: string, includeBodies = false): string {
   for (const ev of events) {
     if (ev.event === "mon_start" || ev.event === "mon_stop") continue
     lines.push(renderEvent(ev, base))
-    if (includeBodies && (ev.event === "fetch" || ev.event === "xhr" || ev.event === "sse")) {
+    if (includeBodies && isMonitorNetEvent(ev.event)) {
       lines.push(...renderPersistedBodyComments(sid, typeof ev.cause === "number" ? ev.cause : undefined))
     }
   }
@@ -576,6 +656,9 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
       const inst = flagValue(filtered, "--instruction")
       const action: Action = { type: "monitor_start" }
       if (inst) action.instruction = inst
+      const capture = flagValue(filtered, "--capture")
+      if (capture) action.capture = capture
+      if (flagPresent(filtered, "--reload") || flagPresent(filtered, "--from-start")) action.reload = true
       // --persist-bodies persists response bodies for EVERY captured fetch/xhr,
       // not just cause-tracked ones. Accepts an optional KB cap (default 64).
       // Example: `monitor start --persist-bodies` or `--persist-bodies 256`.
@@ -746,7 +829,7 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
 const MONITOR_HELP = `interceptor monitor — record user sessions for agent replay
 
 Usage:
-  interceptor monitor start [--instruction "<text>"] [--persist-bodies [<KB>]]
+  interceptor monitor start [--instruction "<text>"] [--capture page-comm] [--reload] [--persist-bodies [<KB>]]
   interceptor monitor stop
   interceptor monitor status
   interceptor monitor pause
@@ -755,7 +838,7 @@ Usage:
   interceptor monitor list
   interceptor monitor export <sessionId> [--format text|json|har|pcapng|plan] [--out <path>] [--json|--plan] [--with-bodies]
 
-start    Begin recording on the active interceptor-group tab.
+start    Begin recording on the active interceptor-group tab. --capture page-comm includes WebSocket/Beacon/BroadcastChannel events; --reload captures from page start.
 stop     End the active session and emit a summary.
 status   Show active sessions and counts.
 pause    Pause emission temporarily (does not unhook listeners).

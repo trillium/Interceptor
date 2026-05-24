@@ -18,6 +18,32 @@ type CapturedHeaderEntry = { url: string; method: string; headers: Record<string
 const capturedHeaders: CapturedHeaderEntry[] = []
 const HEADER_CAP = 200
 
+type PageCommEntry = {
+  type: "ws" | "beacon" | "broadcast" | string
+  event: string
+  timestamp: number
+  tabUrl: string
+  url?: string
+  method?: string
+  direction?: string
+  socketId?: string
+  channelId?: string
+  channelName?: string
+  payloadKind?: string
+  payloadPreview?: string
+  payloadBytes?: number
+  payloadEncoding?: "base64"
+  returnValue?: boolean
+  truncated?: boolean
+  [key: string]: unknown
+}
+const pageCommBuffer: PageCommEntry[] = []
+const PAGE_COMM_CAP = 1000
+const pageCommState = globalThis as typeof globalThis & {
+  __interceptorPageCommSnapshot?: () => PageCommEntry[]
+}
+pageCommState.__interceptorPageCommSnapshot = () => pageCommBuffer.slice()
+
 document.addEventListener("__interceptor_net", ((e: CustomEvent) => {
   try {
     const entry: PassiveCapturedEntry = { ...e.detail, tabUrl: location.href }
@@ -31,6 +57,14 @@ document.addEventListener("__interceptor_headers", ((e: CustomEvent) => {
     const entry: CapturedHeaderEntry = e.detail
     if (capturedHeaders.length >= HEADER_CAP) capturedHeaders.shift()
     capturedHeaders.push(entry)
+  } catch {}
+}) as EventListener)
+
+document.addEventListener("__interceptor_page_comm", ((e: CustomEvent) => {
+  try {
+    const entry: PageCommEntry = { ...e.detail, tabUrl: location.href }
+    if (pageCommBuffer.length >= PAGE_COMM_CAP) pageCommBuffer.shift()
+    pageCommBuffer.push(entry)
   } catch {}
 }) as EventListener)
 
@@ -122,6 +156,41 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "clear_net_log") {
     netBuffer.length = 0
     capturedHeaders.length = 0
+    pageCommBuffer.length = 0
+    sendResponse({ success: true })
+    return true
+  }
+  if (msg.type === "get_page_comm_log") {
+    try {
+      let entries = pageCommBuffer.slice()
+      if (msg.filter) {
+        const pattern = msg.filter.toLowerCase()
+        entries = entries.filter(e => {
+          const url = typeof e.url === "string" ? e.url : ""
+          const channel = typeof e.channelName === "string" ? e.channelName : ""
+          const event = typeof e.event === "string" ? e.event : ""
+          return url.toLowerCase().includes(pattern) ||
+            channel.toLowerCase().includes(pattern) ||
+            event.toLowerCase().includes(pattern)
+        })
+      }
+      if (msg.entryType) {
+        const entryType = String(msg.entryType).toLowerCase()
+        entries = entries.filter(e => String(e.type || "").toLowerCase() === entryType)
+      }
+      if (msg.since) {
+        entries = entries.filter(e => e.timestamp >= msg.since)
+      }
+      const limit = msg.limit || 100
+      entries = entries.slice(-limit)
+      sendResponse({ success: true, data: entries })
+    } catch (err) {
+      sendResponse({ success: false, error: (err as Error).message })
+    }
+    return true
+  }
+  if (msg.type === "clear_page_comm_log") {
+    pageCommBuffer.length = 0
     sendResponse({ success: true })
     return true
   }

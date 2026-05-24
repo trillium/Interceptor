@@ -69,6 +69,10 @@ let package = Package(
                 .linkedFramework("SpriteKit"),
                 // Apple Events / TCC consent (AEDeterminePermissionToAutomateTarget)
                 .linkedFramework("Carbon"),
+                // JavaScript for Automation (JXA) execution via OSAScript.
+                .linkedFramework("OSAKit"),
+                // Pure JavaScriptCore execution for `--jsc` inline scripts.
+                .linkedFramework("JavaScriptCore"),
                 // personal data and distribution surfaces.
                 // PDFKit: PdfDomain (PDFDocument/PDFPage/PDFAnnotation/PDFOutline/PDFSelection).
                 .linkedFramework("PDFKit"),

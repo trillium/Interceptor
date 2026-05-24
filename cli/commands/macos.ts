@@ -863,7 +863,23 @@ export function parseMacosCommand(filtered: string[]): Action | null {
       }
     }
 
-    // ── app_intent (Apple Events / IntentDomain) ──
+    // ── Apple Events / OSA scripts ──
+    case "script": {
+      const scriptSub = filtered[2]
+      if (!scriptSub) {
+        console.error("error: interceptor macos script requires a subcommand: run")
+        process.exit(1)
+      }
+      switch (scriptSub) {
+        case "run":
+          return parseScriptRunAction(filtered, "macos_script_run")
+        default:
+          console.error(`error: unknown macos script subcommand '${scriptSub}'. Expected: run`)
+          process.exit(1)
+      }
+    }
+
+    // ── legacy structured Apple Events verb dispatch ──
     case "intent": {
       const intentSub = filtered[2]
       if (!intentSub) {
@@ -872,36 +888,7 @@ export function parseMacosCommand(filtered: string[]): Action | null {
       }
       switch (intentSub) {
         case "dispatch": {
-          const action: Action = { type: "macos_intent_dispatch" }
-          const script = flagVal(filtered, "--script")
-          const javascript = flagVal(filtered, "--javascript")
-          const bundleId = flagVal(filtered, "--bundle")
-          const intent = flagVal(filtered, "--intent")
-          const target = flagVal(filtered, "--target")
-          const params = flagVal(filtered, "--params")
-          const argsRaw = flagVal(filtered, "--args")
-
-          if (script !== undefined) action.script = script
-          if (javascript !== undefined) action.javascript = javascript
-          if (bundleId !== undefined) action.bundleId = bundleId
-          if (intent !== undefined) action.intent = intent
-          if (target !== undefined) action.target = target
-          if (params !== undefined) {
-            try { action.parameters = JSON.parse(params) }
-            catch { console.error("error: --params must be JSON"); process.exit(1) }
-          }
-          if (argsRaw !== undefined) {
-            try { action.args = JSON.parse(argsRaw) }
-            catch {
-              // Allow space-separated raw form
-              action.args = argsRaw.split(" ").filter(Boolean)
-            }
-          }
-          if (!script && !javascript && !bundleId) {
-            console.error("error: macos intent dispatch requires one of --script, --javascript, or --bundle")
-            process.exit(1)
-          }
-          return action
+          return parseScriptRunAction(filtered, "macos_intent_dispatch", { allowStructuredIntent: true })
         }
         case "warmup": {
           const bundleIds = filtered.slice(3).filter((s) => !s.startsWith("--"))
@@ -1714,12 +1701,89 @@ export function parseMacosCommand(filtered: string[]): Action | null {
   }
 }
 
+function parseScriptRunAction(
+  filtered: string[],
+  type: string,
+  options: { allowStructuredIntent?: boolean } = {}
+): Action {
+  const action: Action = { type }
+  const script = flagVal(filtered, "--script")
+  const jxa = flagVal(filtered, "--jxa")
+  const javascriptAlias = flagVal(filtered, "--javascript")
+  const jsc = flagVal(filtered, "--jsc")
+  const jscHost = optionalFlagVal(filtered, "--jsc-host", "all")
+  const jscUnsafeNative = filtered.includes("--jsc-unsafe-native")
+  const bundleId = flagVal(filtered, "--bundle")
+  const intent = flagVal(filtered, "--intent")
+  const target = flagVal(filtered, "--target")
+  const params = flagVal(filtered, "--params")
+  const argsRaw = flagVal(filtered, "--args")
+  const jxaSource = jxa ?? javascriptAlias
+  const scriptInputs = [
+    script !== undefined ? "--script" : undefined,
+    jxaSource !== undefined ? "--jxa" : undefined,
+    jsc !== undefined ? "--jsc" : undefined,
+  ].filter(Boolean)
+
+  if (jxa !== undefined && javascriptAlias !== undefined) {
+    console.error("error: use only one of --jxa or deprecated --javascript")
+    process.exit(1)
+  }
+  if (scriptInputs.length > 1) {
+    console.error(`error: choose exactly one script source flag (${scriptInputs.join(", ")})`)
+    process.exit(1)
+  }
+
+  if (script !== undefined) action.script = script
+  if (jxaSource !== undefined) action.jxa = jxaSource
+  if (jsc !== undefined) action.jsc = jsc
+  if (jscHost !== undefined || jscUnsafeNative) action.jscHost = jscHost ?? "all"
+  if (bundleId !== undefined) action.bundleId = bundleId
+  if (intent !== undefined) action.intent = intent
+  if (target !== undefined) action.target = target
+  if (params !== undefined) {
+    try { action.parameters = JSON.parse(params) }
+    catch { console.error("error: --params must be JSON"); process.exit(1) }
+  }
+  if (argsRaw !== undefined) {
+    try { action.args = JSON.parse(argsRaw) }
+    catch {
+      // Allow space-separated raw form
+      action.args = argsRaw.split(" ").filter(Boolean)
+    }
+  }
+
+  if (options.allowStructuredIntent) {
+    if (!script && !jxaSource && !jsc && !bundleId) {
+      console.error("error: macos intent dispatch requires one of --script, --jxa, --jsc, or --bundle")
+      process.exit(1)
+    }
+  } else if (!script && !jxaSource && !jsc) {
+    console.error("error: macos script run requires one of --script, --jxa, or --jsc")
+    process.exit(1)
+  }
+  if ((jscHost !== undefined || jscUnsafeNative) && jsc === undefined) {
+    console.error("error: --jsc-host/--jsc-unsafe-native require --jsc")
+    process.exit(1)
+  }
+
+  return action
+}
+
 // ── Flag helpers ──
 
 function flagVal(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag)
   if (idx === -1 || !args[idx + 1]) return undefined
   return args[idx + 1]
+}
+
+function optionalFlagVal(args: string[], flag: string, defaultValue: string): string | undefined {
+  const idx = args.indexOf(flag)
+  if (idx === -1) return undefined
+  const next = args[idx + 1]
+  if (!next || next.startsWith("--")) return defaultValue
+  return next
 }
 
 function flagInt(args: string[], flag: string): number | undefined {

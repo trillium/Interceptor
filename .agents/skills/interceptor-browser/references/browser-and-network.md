@@ -38,6 +38,9 @@ interceptor net log --filter api --limit 20
 ## Handle long-lived or streaming pages
 
 - Use `sse streams`, `sse log`, and `sse tail` for `text/event-stream` traffic.
+- Use `net page-comm log` for WebSocket, Beacon, and BroadcastChannel activity.
+  Use `net monitor on --reload` first when startup sockets must be covered from
+  the beginning of the document.
 - Use `wait-stable` only when the DOM should settle. Avoid it as a blind delay on continuously streaming pages.
 
 ## Use page-world code sparingly
