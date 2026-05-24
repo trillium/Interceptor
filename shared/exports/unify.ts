@@ -33,6 +33,9 @@ export type PassiveNetEntry = {
 function entryTypeToSource(type: string): CaptureSource {
   if (type === "xhr") return "xhr"
   if (type === "sse") return "sse"
+  if (type === "ws") return "ws"
+  if (type === "beacon") return "beacon"
+  if (type === "broadcast") return "broadcast"
   return "fetch"
 }
 
@@ -57,7 +60,7 @@ export function fromPassive(entries: PassiveNetEntry[]): UnifiedCapture[] {
 }
 
 /**
- * Convert a monitor session's events.jsonl stream (filtered to fetch/xhr/sse
+ * Convert a monitor session's events.jsonl stream (filtered to fetch/xhr/sse/ws/beacon/broadcast
  * rows) into UnifiedCapture[]. Optionally enriches each row with the body
  * preview from net.jsonl via the `cause` match key when available.
  *
@@ -86,7 +89,13 @@ export function fromMonitorEvents(
 
   const out: UnifiedCapture[] = []
   for (const ev of events) {
-    if (ev.event !== "fetch" && ev.event !== "xhr" && ev.event !== "sse") continue
+    const eventName = typeof ev.event === "string" ? ev.event : ""
+    const isPageComm =
+      eventName.startsWith("ws_") ||
+      eventName === "beacon" ||
+      eventName === "beacon_error" ||
+      eventName.startsWith("broadcast_")
+    if (eventName !== "fetch" && eventName !== "xhr" && eventName !== "sse" && !isPageComm) continue
 
     const cause = typeof ev.cause === "number" ? ev.cause : undefined
     const seq = typeof ev.s === "number" ? ev.s : undefined
@@ -94,7 +103,16 @@ export function fromMonitorEvents(
       || (cause !== undefined ? byCause.get(cause) : undefined)
 
     const url = typeof ev.u === "string" ? ev.u : ""
-    const method = typeof ev.m === "string" ? ev.m : "GET"
+    const source: CaptureSource =
+      eventName === "xhr" ? "xhr" :
+      eventName === "sse" ? "sse" :
+      eventName.startsWith("ws_") ? "ws" :
+      eventName === "beacon" || eventName === "beacon_error" ? "beacon" :
+      eventName.startsWith("broadcast_") ? "broadcast" :
+      "fetch"
+    const method = typeof ev.m === "string"
+      ? ev.m
+      : source === "beacon" ? "POST" : source === "ws" ? "WEBSOCKET" : source === "broadcast" ? "BROADCAST" : "GET"
     const status = typeof ev.st === "number" ? ev.st : 0
     const ts = typeof ev.t === "number" ? ev.t : 0
     const contentType =
@@ -117,7 +135,7 @@ export function fromMonitorEvents(
       startedAt: ts,
       endedAt: ts,
       durationMs: 0,
-      source: ev.event === "xhr" ? "xhr" : ev.event === "sse" ? "sse" : "fetch",
+      source,
       requestHeaders: {},
       responseHeaders: contentType ? { "content-type": contentType } : {},
       responseBody: bodyPreview,
@@ -127,6 +145,14 @@ export function fromMonitorEvents(
       tabId: typeof ev.tid === "number" ? ev.tid : undefined,
       seq: typeof ev.s === "number" ? ev.s : undefined,
       bodyBytes,
+      event: eventName,
+      direction: typeof ev.dir === "string" ? ev.dir : artifact?.direction,
+      payloadKind: typeof ev.pk === "string" ? ev.pk : artifact?.payloadKind,
+      payloadEncoding: typeof ev.enc === "string" ? ev.enc : artifact?.payloadEncoding,
+      socketId: typeof ev.skt === "string" ? ev.skt : artifact?.socketId,
+      channelId: typeof ev.ch === "string" ? ev.ch : artifact?.channelId,
+      channelName: typeof ev.cn === "string" ? ev.cn : artifact?.channelName,
+      returnValue: typeof ev.rv === "boolean" ? ev.rv : artifact?.returnValue,
     })
   }
   return out
@@ -143,7 +169,7 @@ export function fromMonitorArtifacts(artifacts: MonitorNetArtifact[]): UnifiedCa
     startedAt: 0,
     endedAt: 0,
     durationMs: 0,
-    source: "monitor",
+    source: a.kind,
     requestHeaders: {},
     responseHeaders: {},
     responseBody: a.bodyPreview || "",
@@ -153,5 +179,12 @@ export function fromMonitorArtifacts(artifacts: MonitorNetArtifact[]): UnifiedCa
     tabId: a.tid,
     seq: a.seq,
     bodyBytes: a.bodyBytes,
+    direction: a.direction,
+    payloadKind: a.payloadKind,
+    payloadEncoding: a.payloadEncoding,
+    socketId: a.socketId,
+    channelId: a.channelId,
+    channelName: a.channelName,
+    returnValue: a.returnValue,
   }))
 }

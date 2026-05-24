@@ -60,6 +60,17 @@
         "<all_urls>"
       ],
       "js": [
+        "net-buffer-content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
         "inject-net.js"
       ],
       "run_at": "document_start",

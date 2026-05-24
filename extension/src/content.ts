@@ -1,4 +1,3 @@
-import "./content/net-buffer"
 import "./content/canvas-bridge"
 import "./content/dom-observer"
 import "./content/monitor"

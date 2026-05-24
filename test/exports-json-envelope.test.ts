@@ -130,4 +130,35 @@ describe("JSON envelope export", () => {
     expect(out.session?.sid).toBe("abc-123")
     expect(out.session?.counts?.net).toBe(25)
   })
+
+  test("page communication metadata is preserved", () => {
+    const out = buildJsonEnvelope([
+      {
+        url: "wss://example.com/socket",
+        method: "WEBSOCKET",
+        status: 0,
+        startedAt: 1_700_000_000_000,
+        endedAt: 1_700_000_000_000,
+        durationMs: 0,
+        source: "ws",
+        requestHeaders: {},
+        responseHeaders: {},
+        responseBody: "hello",
+        truncated: false,
+        event: "ws_send",
+        direction: "send",
+        payloadKind: "string",
+        socketId: "ws-1",
+        bodyBytes: 5,
+      },
+    ], META)
+    expect(out.entries[0].source).toBe("ws")
+    expect(out.entries[0].response.content.sizeBytes).toBe(5)
+    expect(out.entries[0].pageCommunication).toEqual({
+      event: "ws_send",
+      direction: "send",
+      payloadKind: "string",
+      socketId: "ws-1",
+    })
+  })
 })

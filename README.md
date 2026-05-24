@@ -146,7 +146,7 @@ Interceptor ships one CLI binary with two product surfaces. Pick by what you're 
 |---|---|---|
 | Click / type on a webpage | Browser | `interceptor act e5`, `interceptor click`, `interceptor type` |
 | Read a webpage's DOM tree, visible text, or HTML | Browser | `interceptor tree`, `interceptor text`, `interceptor html` |
-| Capture passive `fetch`/XHR/SSE/WebSocket traffic on a page | Browser | `interceptor net log`, `interceptor sse log` |
+| Capture passive `fetch`/XHR/SSE/WebSocket/Beacon/BroadcastChannel traffic on a page | Browser | `interceptor net log`, `interceptor sse log`, `interceptor net page-comm log` |
 | Rewrite outbound page requests in flight | Browser | `interceptor override` |
 | Drive Canva / Google Docs / Google Slides scene graph | Browser | `interceptor scene *` |
 | Record & replay a human's web flow | Browser | `interceptor monitor *` |
@@ -314,7 +314,7 @@ The legacy individual commands (`interceptor tab new`, `interceptor tree`, `inte
 
 **Named Contexts** — When two browser profiles (or Chrome + Brave) both connect to the same daemon, the daemon tracks each extension as a separate named context. Each profile's extension auto-generates a stable UUID on first run (stored in `chrome.storage.local`). Run `interceptor contexts` to list connected IDs, then pass `--context <id>` to route a command to a specific profile. Without `--context`, a command succeeds only when exactly one context is connected — the daemon errors (fail-fast) when zero or multiple contexts are present. Primary use case: cross-account security testing where you need Account A and Account B active simultaneously.
 
-**Passive Network** — All `fetch()` and `XMLHttpRequest` traffic on every page is captured automatically. No debugger, no infobanner. Query it with `interceptor net log`.
+**Passive Network** — `fetch()` and `XMLHttpRequest` traffic on every page is captured automatically. SSE streams are exposed with `interceptor sse log`. WebSocket, Beacon, and BroadcastChannel activity is captured as page communication with `interceptor net page-comm log`; use `interceptor net monitor on --reload` when you need sockets opened during page startup. No debugger, no infobanner.
 
 **Scene Graph** — Profile-driven access to visual editors that don't render to the DOM normally: Canva, Google Docs, Google Slides. Enumerate objects by stable ID, click shapes, read full document text, navigate slide decks, render pages to PNG. `interceptor scene` — no CDP, no vision, no screenshots needed.
 
@@ -1111,14 +1111,24 @@ interceptor macos log query --subsystem com.apple.network --level error --last 3
 
 `OSLogStore` query with subsystem/category/level filters. See [`docs/native/log-query.md`](docs/native/log-query.md).
 
-#### Apple Events (Intent)
+#### OSA Scripts and Apple Events
 
 ```bash
-interceptor macos intent dispatch --bundle com.brave.Browser --script 'open location "https://example.com"'
+interceptor macos script run --jxa '1 + 1'
+interceptor macos script run --jxa 'run = argv => argv.join("|")' --args '["alpha","beta"]'
+interceptor macos script run --bundle com.brave.Browser --jxa 'target.openLocation("https://example.com")'
+interceptor macos script run --jsc '1 + 1'
+interceptor macos script run --jsc 'run = argv => argv.join("|")' --args '["alpha","beta"]'
+interceptor macos script run --jsc 'host.sqlite("/tmp/example.sqlite", "select 1")' --jsc-host sqlite
+interceptor macos script run --jsc 'host.sh("pwd").stdout' --jsc-host shell
+interceptor macos script run --script 'tell application "Music" to play'
+interceptor macos intent dispatch --script 'tell application id "com.brave.Browser" to open location "https://example.com"'
+interceptor macos intent dispatch --jxa '1 + 1'
+interceptor macos intent dispatch --bundle com.brave.Browser --jxa 'target.openLocation("https://example.com")'
 interceptor macos intent warmup --bundle com.brave.Browser
 ```
 
-Apple Events → cross-app verb dispatch via `NSAppleScript`. TCC consent per (bridge, target_app) pair. See [`docs/native/app-intent.md`](docs/native/app-intent.md).
+Raw AppleScript/JXA runs through OSAKit; plain `--jsc` runs inside the bridge with JavaScriptCore and does not provide JXA's `Application(...)` host object. Add `--jsc-host [all|fs,sqlite,shell,osa,env]` only when the script needs native host capabilities. Structured `intent dispatch` stays as the Apple Events verb-dispatch surface. With `--bundle` on JXA, the bridge exposes `target = Application("<bundleId>")` and does not activate the target app by default. The older `--javascript` flag remains a compatibility alias for `--jxa`. TCC consent is per (bridge, target_app) pair. See [`docs/native/app-intent.md`](docs/native/app-intent.md).
 
 #### Container Runtime (macOS 26+)
 

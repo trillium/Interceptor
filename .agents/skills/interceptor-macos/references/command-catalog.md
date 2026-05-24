@@ -79,14 +79,23 @@ interceptor macos display
 
 CGS captures occluded / minimized / cross-Space windows. Avoid `--mode display` for app-specific captures.
 
-## Apple Events (intent)
+## OSA Scripts + Apple Events
 
 ```bash
-interceptor macos intent dispatch --bundle <id> --script '<applescript>'
+interceptor macos script run --jxa '<jxa>'
+interceptor macos script run --jxa '<jxa>' --args '["a","b"]'
+interceptor macos script run --bundle <id> --jxa '<jxa>'
+interceptor macos script run --jsc '<javascript-core>'
+interceptor macos script run --jsc 'run = argv => argv.join("|")' --args '["a","b"]'
+interceptor macos script run --jsc 'host.sqlite("/tmp/example.sqlite", "select 1")' --jsc-host sqlite
+interceptor macos script run --jsc 'host.sh("pwd").stdout' --jsc-host shell
+interceptor macos script run --script '<applescript>'
+interceptor macos intent dispatch --script 'tell application id "<id>" to <verb>'
+interceptor macos intent dispatch --bundle <id> --jxa '<jxa>'
 interceptor macos intent warmup com.brave.Browser com.apple.mail com.apple.Notes
 ```
 
-Never include `activate` unless the user asked for foregrounding. First dispatch per app prompts for Apple Events consent.
+Never include `activate` unless the user asked for foregrounding. `--javascript` is a deprecated alias for `--jxa`; `--jsc` is plain JavaScriptCore in the bridge and cannot use `--bundle` or JXA's `Application(...)`. Add `--jsc-host [all|fs,sqlite,shell,osa,env]` only when native host access is explicitly needed; `--jsc-unsafe-native` aliases `--jsc-host all`. First Apple Events dispatch per app prompts for consent.
 
 ## Vision + Speech + NLP + AI
 

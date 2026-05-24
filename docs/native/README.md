@@ -25,7 +25,7 @@ The bridge ships 43 domains across reads, drives, capture, networking, recording
 | Input | `interceptor macos {click, type, keys, scroll, drag}` | OS-level CGEvent input |
 | Menu | `interceptor macos menu` | Frontmost app menu tree + invoke |
 | Sensitive | `interceptor macos sensitive` | Sensitive content analysis |
-| **Intent** | `interceptor macos intent {dispatch, warmup}` | Apple Events → cross-app verb dispatch via `NSAppleScript`. TCC consent per (bridge, target_app) pair. See [app-intent.md](app-intent.md). |
+| **Script / Intent** | `interceptor macos script run`, `interceptor macos intent {dispatch, warmup}` | OSA scripts through AppleScript/JXA, plain JavaScriptCore through `--jsc`, plus structured Apple Events dispatch. TCC consent per (bridge, target_app) pair. See [app-intent.md](app-intent.md). |
 | **Container** | `interceptor macos container run` | Run an OCI image in Apple's `container` runtime (macOS 26+). See [container-run.md](container-run.md). |
 
 ### Capturing & streaming

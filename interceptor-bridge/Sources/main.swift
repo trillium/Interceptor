@@ -116,6 +116,7 @@ router.register("overlay", handler: overlayDomain)
 router.register("fs", handler: fsDomain)
 router.register("url", handler: netDomain)
 router.register("log", handler: logDomain)
+router.register("script", handler: intentDomain)
 router.register("intent", handler: intentDomain)
 router.register("container", handler: containerDomain)
 // register the new `vm` domain.

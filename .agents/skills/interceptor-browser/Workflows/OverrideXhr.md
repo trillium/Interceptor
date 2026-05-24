@@ -55,10 +55,13 @@ If verification at step 4 shows the override didn't fire, the pattern probably m
 
 `interceptor override` uses the extension's declarativeNetRequest path — no debugger banner, no DevTools UI fingerprint. Reach for `interceptor network on` + `interceptor network override` only when:
 - You need request-body rewriting (extension overrides are URL/header-only for some sites)
-- You need WebSocket frame inspection (passive `net` doesn't capture WS — see canvas-rendered notes for the MAIN-world WS patch)
 - You need to observe raw bytes pre-decode
 
 CDP attach shows a "DevTools is debugging this tab" banner. Pages that watch for it will behave differently. Default to extension overrides.
+
+For WebSocket, Beacon, or BroadcastChannel observation, use
+`interceptor net page-comm log` or
+[`CapturePageCommunication.md`](CapturePageCommunication.md) before CDP.
 
 ## Pitfalls
 

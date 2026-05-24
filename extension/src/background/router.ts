@@ -20,11 +20,12 @@ import { handleEvaluateActions } from "./capabilities/evaluate"
 import { handleStyleActions } from "./capabilities/style"
 import { handleFrameActions } from "./capabilities/frames"
 import { handleMetaActions } from "./capabilities/meta"
-import { handlePassiveNetActions } from "./capabilities/passive-net"
+import { handlePassiveNetActions, restorePageCommCaptureConfig } from "./capabilities/passive-net"
 import { handleCdpNetworkActions } from "./capabilities/cdp-network-actions"
 import { handleMonitorActions, registerMonitorListeners } from "./capabilities/monitor"
 
 registerMonitorListeners()
+restorePageCommCaptureConfig()
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
@@ -68,7 +69,11 @@ const EVALUATE_ACTIONS = new Set(["evaluate"])
 const STYLE_ACTIONS = new Set(["style_inject", "style_remove"])
 const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"])
 const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree"])
-const PASSIVE_NET_ACTIONS = new Set(["net_log", "net_clear", "net_headers", "sse_log", "sse_streams", "sse_chunk", "set_net_overrides", "clear_net_overrides"])
+const PASSIVE_NET_ACTIONS = new Set([
+  "net_log", "net_clear", "net_headers", "sse_log", "sse_streams", "sse_chunk",
+  "set_net_overrides", "clear_net_overrides",
+  "page_comm_log", "page_comm_clear", "page_comm_enable", "page_comm_disable", "page_comm_status"
+])
 const CDP_NETWORK_ACTIONS = new Set(["network_intercept", "network_log", "network_override"])
 const MONITOR_ACTIONS = new Set(["monitor_start", "monitor_stop", "monitor_status", "monitor_pause", "monitor_resume"])
 const SCENE_ACTIONS = new Set([

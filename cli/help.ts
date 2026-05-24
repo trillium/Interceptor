@@ -142,6 +142,12 @@ Passive Network (always-on, no CDP):
   interceptor net log --since <timestamp>    Entries after timestamp
   interceptor net log --limit <n>            Max entries (default 100)
   interceptor net clear                      Flush passive capture buffer
+  interceptor net monitor on [--reload]      Arm WebSocket/Beacon/BroadcastChannel capture
+  interceptor net monitor off                Disable dynamic page-communication capture
+  interceptor net monitor status             Show dynamic capture config
+  interceptor net page-comm log              Captured WebSocket/Beacon/BroadcastChannel events
+  interceptor net page-comm log --type ws    Filter by ws|beacon|broadcast
+  interceptor net page-comm clear            Flush page-communication buffer
   interceptor net headers                    Show captured request headers (CSRF, auth)
   interceptor net headers --filter <pattern> Filter headers by URL
 
@@ -294,10 +300,19 @@ Native (macOS Bridge — full install only):
   interceptor macos capture frame [--timeout-ms 3000]      Block briefly for first frame; default 3000ms
   interceptor macos capture stop
 
-  Apple Events (cross-app routing without raising):
+  Scripts and Apple Events (cross-app routing without raising):
+  interceptor macos script run --jxa '<jxa>'
+  interceptor macos script run --jxa '<jxa>' --args '["a","b"]'
+  interceptor macos script run --bundle <id> --jxa '<jxa>'
+  interceptor macos script run --jsc '<javascript-core>'
+  interceptor macos script run --jsc 'run = argv => argv.join("|")' --args '["a","b"]'
+  interceptor macos script run --jsc 'host.sqlite("/tmp/example.sqlite", "select 1")' --jsc-host sqlite
+  interceptor macos script run --jsc 'host.sh("pwd").stdout' --jsc-host shell
+  interceptor macos script run --script '<applescript>'
   interceptor macos intent dispatch --bundle <id> --script '<applescript>'
-  interceptor macos intent dispatch --bundle <id> --javascript '<jxa>'
+  interceptor macos intent dispatch --bundle <id> --jxa '<jxa>'
   interceptor macos intent warmup <bundleId>...
+  Note: --javascript is deprecated and aliases --jxa.
 
   System & Filesystem:
   interceptor macos clipboard read|write|tail

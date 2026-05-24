@@ -96,6 +96,27 @@ function buildEntry(c: UnifiedCapture): InterceptorEntry {
   }
   if (c.tabId !== undefined) entry.tabId = c.tabId
   if (c.seq !== undefined) entry.seq = c.seq
+  if (
+    c.event !== undefined ||
+    c.direction !== undefined ||
+    c.payloadKind !== undefined ||
+    c.payloadEncoding !== undefined ||
+    c.socketId !== undefined ||
+    c.channelId !== undefined ||
+    c.channelName !== undefined ||
+    c.returnValue !== undefined
+  ) {
+    entry.pageCommunication = {
+      ...(c.event !== undefined ? { event: c.event } : {}),
+      ...(c.direction !== undefined ? { direction: c.direction } : {}),
+      ...(c.payloadKind !== undefined ? { payloadKind: c.payloadKind } : {}),
+      ...(c.payloadEncoding !== undefined ? { payloadEncoding: c.payloadEncoding } : {}),
+      ...(c.socketId !== undefined ? { socketId: c.socketId } : {}),
+      ...(c.channelId !== undefined ? { channelId: c.channelId } : {}),
+      ...(c.channelName !== undefined ? { channelName: c.channelName } : {}),
+      ...(c.returnValue !== undefined ? { returnValue: c.returnValue } : {}),
+    }
+  }
 
   return entry
 }

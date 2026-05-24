@@ -168,4 +168,74 @@ describe("macos parser", () => {
     expect(action.services).toEqual(["Accessibility", "PostEvent"])
     expect(action.fullDisk).toBe(true)
   })
+
+  test("intent dispatch parses pure JXA", () => {
+    const action = parseMacosCommand(["macos", "intent", "dispatch", "--jxa", "1 + 1"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_intent_dispatch")
+    expect(action.jxa).toBe("1 + 1")
+    expect(action.bundleId).toBeUndefined()
+  })
+
+  test("intent dispatch parses bundle-targeted JXA", () => {
+    const action = parseMacosCommand([
+      "macos", "intent", "dispatch",
+      "--bundle", "com.apple.finder",
+      "--jxa", "target.name()"
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_intent_dispatch")
+    expect(action.bundleId).toBe("com.apple.finder")
+    expect(action.jxa).toBe("target.name()")
+  })
+
+  test("intent dispatch keeps deprecated --javascript as a JXA alias", () => {
+    const action = parseMacosCommand(["macos", "intent", "dispatch", "--javascript", "1 + 1"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_intent_dispatch")
+    expect(action.jxa).toBe("1 + 1")
+  })
+
+  test("script run parses pure JXA", () => {
+    const action = parseMacosCommand(["macos", "script", "run", "--jxa", "1 + 1"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_script_run")
+    expect(action.jxa).toBe("1 + 1")
+    expect(action.bundleId).toBeUndefined()
+  })
+
+  test("script run parses bundle-targeted JXA", () => {
+    const action = parseMacosCommand([
+      "macos", "script", "run",
+      "--bundle", "com.apple.finder",
+      "--jxa", "target.name()"
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_script_run")
+    expect(action.bundleId).toBe("com.apple.finder")
+    expect(action.jxa).toBe("target.name()")
+  })
+
+  test("script run parses JXA argv", () => {
+    const action = parseMacosCommand([
+      "macos", "script", "run",
+      "--jxa", "run = argv => argv.join('|')",
+      "--args", "[\"alpha\",\"beta\"]"
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_script_run")
+    expect(action.args).toEqual(["alpha", "beta"])
+  })
+
+  test("script run parses JavaScriptCore inline source", () => {
+    const action = parseMacosCommand(["macos", "script", "run", "--jsc", "1 + 1"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_script_run")
+    expect(action.jsc).toBe("1 + 1")
+    expect(action.bundleId).toBeUndefined()
+  })
+
+  test("script run parses JavaScriptCore argv", () => {
+    const action = parseMacosCommand([
+      "macos", "script", "run",
+      "--jsc", "run = argv => argv.join('|')",
+      "--args", "[\"alpha\",\"beta\"]"
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_script_run")
+    expect(action.jsc).toBe("run = argv => argv.join('|')")
+    expect(action.args).toEqual(["alpha", "beta"])
+  })
 })

@@ -4,6 +4,28 @@
 
 type Action = { type: string; [key: string]: unknown }
 
+function flagValue(filtered: string[], flag: string): string | undefined {
+  const idx = filtered.indexOf(flag)
+  return idx !== -1 ? filtered[idx + 1] : undefined
+}
+
+function flagPresent(filtered: string[], flag: string): boolean {
+  return filtered.includes(flag)
+}
+
+function splitPatterns(raw: string | undefined): string[] {
+  if (!raw) return ["<all_urls>"]
+  return raw.split(",").map((p) => p.trim()).filter(Boolean)
+}
+
+function pageCommPatterns(filtered: string[]): string[] {
+  return splitPatterns(
+    flagValue(filtered, "--pattern") ||
+    flagValue(filtered, "--patterns") ||
+    flagValue(filtered, "--filter")
+  )
+}
+
 export function parseNetworkCommand(filtered: string[]): Action {
   const cmd = filtered[0]
 
@@ -38,6 +60,36 @@ export function parseNetworkCommand(filtered: string[]): Action {
 
     case "net":
       switch (filtered[1]) {
+        case "monitor": {
+          const sub = filtered[2]
+          if (sub === "on") {
+            return {
+              type: "page_comm_enable",
+              reload: flagPresent(filtered, "--reload") || flagPresent(filtered, "--from-start"),
+              patterns: pageCommPatterns(filtered),
+              persistAcrossSessions: flagPresent(filtered, "--persist")
+            }
+          }
+          if (sub === "off") return { type: "page_comm_disable" }
+          if (sub === "status") return { type: "page_comm_status" }
+          console.error("error: unknown net monitor subcommand. Use: on, off, status")
+          process.exit(1)
+        }
+        case "page-comm": {
+          const sub = filtered[2]
+          if (sub === "log") {
+            return {
+              type: "page_comm_log",
+              filter: flagValue(filtered, "--filter"),
+              entryType: flagValue(filtered, "--type"),
+              since: flagValue(filtered, "--since") ? parseInt(flagValue(filtered, "--since")!) : undefined,
+              limit: flagValue(filtered, "--limit") ? parseInt(flagValue(filtered, "--limit")!) : undefined
+            }
+          }
+          if (sub === "clear") return { type: "page_comm_clear" }
+          console.error("error: unknown net page-comm subcommand. Use: log, clear")
+          process.exit(1)
+        }
         case "log": {
           const formatRaw = filtered.includes("--format") ? filtered[filtered.indexOf("--format") + 1] : undefined
           const allowedFormats = new Set(["text", "json", "har", "pcapng"])

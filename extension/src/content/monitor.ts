@@ -467,6 +467,78 @@ function onInterceptorSse(e: Event) {
   } catch {}
 }
 
+function onInterceptorPageComm(e: Event) {
+  if (!armed) return
+  try {
+    emitPageCommDetail((e as CustomEvent).detail)
+  } catch {}
+}
+
+function emitPageCommDetail(rawDetail: unknown): void {
+  if (!armed) return
+  const detail = rawDetail as {
+    type?: string
+    event?: string
+    url?: string
+    method?: string
+    direction?: string
+    socketId?: string
+    channelId?: string
+    channelName?: string
+    payloadKind?: string
+    payloadPreview?: string
+    payloadBytes?: number
+    payloadEncoding?: string
+    returnValue?: boolean
+    truncated?: boolean
+    code?: number
+    reason?: string
+    wasClean?: boolean
+    readyState?: number
+    error?: string
+  } | undefined
+  if (!detail) return
+  const now = Date.now()
+  const cause = findCause(now)
+  const kind = detail.event || detail.type || "page_comm"
+  const payloadPreview = typeof detail.payloadPreview === "string"
+    ? truncate(detail.payloadPreview, netBodyCap)
+    : undefined
+  emit({
+    k: kind,
+    ...(detail.url ? { u: truncate(detail.url, 512) } : {}),
+    ...(detail.method ? { m: detail.method } : {}),
+    ...(detail.direction ? { dir: detail.direction } : {}),
+    ...(detail.socketId ? { skt: detail.socketId } : {}),
+    ...(detail.channelId ? { ch: detail.channelId } : {}),
+    ...(detail.channelName ? { cn: truncate(detail.channelName, 160) } : {}),
+    ...(detail.payloadKind ? { pk: detail.payloadKind } : {}),
+    ...(payloadPreview !== undefined ? { bp: payloadPreview } : {}),
+    ...(typeof detail.payloadBytes === "number" ? { bt: detail.payloadBytes } : {}),
+    ...(detail.payloadEncoding ? { enc: detail.payloadEncoding } : {}),
+    ...(detail.returnValue !== undefined ? { rv: detail.returnValue } : {}),
+    ...(detail.truncated === true || (payloadPreview && payloadPreview.length >= netBodyCap) ? { trn: true } : {}),
+    ...(typeof detail.code === "number" ? { code: detail.code } : {}),
+    ...(detail.reason ? { reason: truncate(detail.reason, 240) } : {}),
+    ...(typeof detail.wasClean === "boolean" ? { clean: detail.wasClean } : {}),
+    ...(typeof detail.readyState === "number" ? { rs: detail.readyState } : {}),
+    ...(detail.error ? { err: truncate(detail.error, 240) } : {}),
+    ...(cause !== undefined ? { cause } : {}),
+    tr: false
+  })
+}
+
+function drainBufferedPageComm(startedAt: number): void {
+  const pageCommSnapshot = (globalThis as typeof globalThis & {
+    __interceptorPageCommSnapshot?: () => Array<{ timestamp?: number; [key: string]: unknown }>
+  }).__interceptorPageCommSnapshot
+  if (typeof pageCommSnapshot !== "function") return
+  for (const entry of pageCommSnapshot()) {
+    if (typeof entry.timestamp === "number" && entry.timestamp < startedAt) continue
+    emitPageCommDetail(entry)
+  }
+}
+
 // -----------------------------------------------------------------------------
 // arm / disarm
 // -----------------------------------------------------------------------------
@@ -515,6 +587,8 @@ export function arm(
   // __interceptor_net events from the MAIN-world inject script
   document.addEventListener("__interceptor_net", onInterceptorNet as EventListener)
   document.addEventListener("__interceptor_sse", onInterceptorSse as EventListener)
+  document.addEventListener("__interceptor_page_comm", onInterceptorPageComm as EventListener)
+  drainBufferedPageComm(_startedAt)
 
   // MutationObserver on documentElement so <html> attribute changes are seen
   mutationObserver = new MutationObserver(onMutations)
@@ -540,6 +614,7 @@ export function disarm(): { evt: number; mut: number; net: number } {
 
   try { document.removeEventListener("__interceptor_net", onInterceptorNet as EventListener) } catch {}
   try { document.removeEventListener("__interceptor_sse", onInterceptorSse as EventListener) } catch {}
+  try { document.removeEventListener("__interceptor_page_comm", onInterceptorPageComm as EventListener) } catch {}
 
   if (mutationObserver) {
     try { mutationObserver.disconnect() } catch {}
