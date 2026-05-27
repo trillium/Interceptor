@@ -7,6 +7,12 @@
 
 import { existsSync } from "node:fs"
 import { sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
+import {
+  attachMonitorTaskSource,
+  markMonitorTaskSourceAttachFailed,
+  resolveOrCreateMonitorTask,
+  validateMonitorTaskMode,
+} from "../../shared/monitor-tasks"
 
 type Action = { type: string; [key: string]: unknown }
 type Result = { success: boolean; error?: string; data?: unknown }
@@ -79,11 +85,57 @@ export async function runMacosCommand(
   const action = parseMacosCommand(filtered)
   if (!action) process.exit(1)
 
+  let pendingMonitorTaskId: string | undefined
+  if (action.type === "macos_monitor" && action.sub === "start" && typeof action.taskRef === "string") {
+    try {
+      const { task } = resolveOrCreateMonitorTask({
+        taskRef: action.taskRef,
+        mode: typeof action.taskMode === "string" ? action.taskMode : undefined,
+        instruction: typeof action.instruction === "string" ? action.instruction : undefined,
+        createdBy: "macos-monitor",
+        retentionPolicyId: typeof action.retentionPolicyId === "string" ? action.retentionPolicyId : undefined,
+        guardPolicyId: typeof action.guardPolicyId === "string" ? action.guardPolicyId : undefined,
+        verifierPolicyId: typeof action.verifierPolicyId === "string" ? action.verifierPolicyId : undefined,
+      })
+      pendingMonitorTaskId = task.taskId
+      action.taskId = task.taskId
+    } catch (err) {
+      console.error(`error: ${(err as Error).message}`)
+      process.exit(1)
+    }
+  }
+
   const result = await send(action, opts.globalTabId, opts.useWs)
 
   if (!result.success) {
+    if (pendingMonitorTaskId) {
+      markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, undefined, result.error || "macos monitor start failed")
+    }
     console.error("error:", result.error || "unknown error")
     process.exit(1)
+  }
+
+  if (pendingMonitorTaskId) {
+    const data = (result.data || {}) as Record<string, unknown>
+    const sid = typeof data.sid === "string" ? data.sid : typeof data.sessionId === "string" ? data.sessionId : undefined
+    if (sid) {
+      try {
+        attachMonitorTaskSource(pendingMonitorTaskId, sid, {
+          surface: "macos",
+          rootPid: typeof data.rootPid === "number" ? data.rootPid : undefined,
+          rootBundleId: typeof data.rootBundleId === "string" ? data.rootBundleId : undefined,
+          rootApp: typeof data.rootApp === "string" ? data.rootApp : undefined,
+        })
+        data.taskId = pendingMonitorTaskId
+        result.data = data
+      } catch (err) {
+        markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, sid, (err as Error).message)
+        console.error(`error: macOS monitor session ${sid} started but task attachment failed: ${(err as Error).message}`)
+        process.exit(1)
+      }
+    } else {
+      markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, undefined, "macos monitor response did not include sid")
+    }
   }
 
   if (opts.jsonMode) {
@@ -673,6 +725,24 @@ export function parseMacosCommand(filtered: string[]): Action | null {
         format: filtered.includes("--json") ? "json" : filtered.includes("--plan") ? "plan" : "timeline",
         raw: filtered.includes("--raw"),
         limit: flagInt(filtered, "--limit"),
+      }
+      const taskRef = flagVal(filtered, "--task")
+      if (taskRef) {
+        action.taskRef = taskRef
+        if (!action.instruction) action.instruction = taskRef
+        const taskMode = flagVal(filtered, "--mode")
+        try {
+          action.taskMode = validateMonitorTaskMode(taskMode)
+        } catch (err) {
+          console.error(`error: ${(err as Error).message}`)
+          process.exit(1)
+        }
+        const retentionPolicyId = flagVal(filtered, "--retention-policy")
+        const guardPolicyId = flagVal(filtered, "--guard-policy")
+        const verifierPolicyId = flagVal(filtered, "--verifier-policy")
+        if (retentionPolicyId) action.retentionPolicyId = retentionPolicyId
+        if (guardPolicyId) action.guardPolicyId = guardPolicyId
+        if (verifierPolicyId) action.verifierPolicyId = verifierPolicyId
       }
       if (appFlag) action.app = appFlag
       if (apps) action.apps = apps

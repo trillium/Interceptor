@@ -28,6 +28,7 @@ interface TrustedActionRecord {
 
 interface SessionRecord {
   sessionId: string
+  taskId?: string
   rootTabId: number
   startedAt: number
   instruction?: string
@@ -141,6 +142,7 @@ function emitMonEvent(
     type: "event",
     event: kind,
     sid: session.sessionId,
+    ...(session.taskId ? { taskId: session.taskId } : {}),
     s: seq,
     t: Date.now(),
     ...base,
@@ -567,6 +569,7 @@ function registerTabListenersOnce(): void {
           type: "event",
           event: "mon_stop",
           sid: session.sessionId,
+          ...(session.taskId ? { taskId: session.taskId } : {}),
           s: nextSeq(session),
           t: Date.now(),
           reason: "tab_closed",
@@ -718,6 +721,7 @@ export async function handleMonitorActions(
       const sessionId = crypto.randomUUID()
       const startedAt = Date.now()
       const instruction = (action.instruction as string) || undefined
+      const taskId = typeof action.taskId === "string" ? action.taskId : undefined
       let url: string | undefined
       try {
         const tab = await chrome.tabs.get(resolvedTabId)
@@ -734,6 +738,7 @@ export async function handleMonitorActions(
       )
       const session: SessionRecord = {
         sessionId,
+        taskId,
         rootTabId: resolvedTabId,
         startedAt,
         instruction,
@@ -767,9 +772,10 @@ export async function handleMonitorActions(
 
       sendToHost({
         type: "event",
-        event: "mon_start",
-        sid: sessionId,
-        s: nextSeq(session),
+          event: "mon_start",
+          sid: sessionId,
+          ...(taskId ? { taskId } : {}),
+          s: nextSeq(session),
         t: startedAt,
         tid: resolvedTabId,
         url: session.url,
@@ -798,6 +804,7 @@ export async function handleMonitorActions(
           startedAt,
           url: session.url,
           instruction,
+          ...(taskId ? { taskId } : {}),
           ...(capture ? { capture } : {}),
           ...(shouldReload ? { reload: true, mode: "from-start" } : {}),
           ...(capture === "page-comm" && !shouldReload
@@ -833,6 +840,7 @@ export async function handleMonitorActions(
             type: "event",
             event: "mon_stop",
             sid: session.sessionId,
+            ...(session.taskId ? { taskId: session.taskId } : {}),
             s: nextSeq(session),
             t: Date.now(),
             reason: "user",
@@ -918,6 +926,7 @@ export async function handleMonitorActions(
         type: "event",
         event: "mon_pause",
         sid,
+        ...(session.taskId ? { taskId: session.taskId } : {}),
         s: nextSeq(session),
         t: Date.now(),
         ...(getCurrentAttachment(session) ? { tid: getCurrentAttachment(session)!.tabId } : {})
@@ -940,6 +949,7 @@ export async function handleMonitorActions(
         type: "event",
         event: "mon_resume",
         sid,
+        ...(session.taskId ? { taskId: session.taskId } : {}),
         s: nextSeq(session),
         t: Date.now(),
         ...(current ? { tid: current.tabId, doc: current.documentId } : {})

@@ -218,13 +218,22 @@ Scene Graph (Rich Editors):
 Recording (Session Monitor):
   interceptor monitor start ["<instruction>"]   Start recording user actions on active tab
     --instruction "..."                  Annotate with task intent for replay
+    --task "..."                         Create/attach a task-scoped monitor envelope
+    --mode human-observe|human-teach|agent-record|mixed
   interceptor monitor stop                      End recording and emit summary
+  interceptor monitor stop --task <taskId>      Stop a task envelope, preserving source artifacts
   interceptor monitor pause                     Stop emitting events without ending session
   interceptor monitor resume                    Resume an active paused session
   interceptor monitor status [--all]            Show status of current/all monitor sessions
+  interceptor monitor status --task <taskId>    Show task envelope status
+  interceptor monitor task attach <taskId> <sid> Attach an existing source session
+  interceptor monitor task snapshot <taskId>    Snapshot source artifacts under the task root
+  interceptor monitor task quality <taskId>     Show task capture readiness gates
+  interceptor monitor task compile-blueprint <taskId>  Enforce blueprint-readiness gate
   interceptor monitor list                      List all sessions in the event log
   interceptor monitor tail [--raw] [--current]  Live tail current session (pretty by default)
   interceptor monitor export <sessionId>        Render a session as aligned text
+  interceptor monitor export --task <taskId>    Render task JSON/timeline/transcript/segments/quality
     --json                               Raw JSONL for the session
     --plan                               Emit a 'interceptor ...' replay script
     --with-bodies                        (P1) Merge cached response bodies
@@ -337,6 +346,7 @@ Native (macOS Bridge — full install only):
 
   Recording & Replay:
   interceptor macos monitor start [--instruction "<intent>"]
+                                  [--task "<task|taskId>"] [--mode human-observe|human-teach|agent-record|mixed]
                                   [--app <name>|<bundleId>] [--apps a,b,c] [--all-apps]
                                   [--include input|files|clipboard|network|notifications|log|speech]
                                   [--exclude key|mouse-moved]

@@ -8,6 +8,7 @@ import {
   buildPlan,
   readMonEvents,
   listSessions,
+  parseMonitorCommand,
 } from "../cli/commands/monitor"
 import {
   appendSessionEvent,
@@ -50,6 +51,22 @@ describe("monitor sparse format + renderer + plan generator", () => {
     expect(escapeArg("hello")).toBe("hello")
     expect(escapeArg('say "hi"')).toBe('say \\"hi\\"')
     expect(escapeArg("a\\b")).toBe("a\\\\b")
+  })
+
+  test("parseMonitorCommand threads task start metadata", async () => {
+    const action = await parseMonitorCommand([
+      "monitor", "start",
+      "--task", "Teach 9 AM batch",
+      "--mode", "human-teach",
+      "--retention-policy", "retain-short",
+      "--guard-policy", "approval-required",
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("monitor_start")
+    expect(action.taskRef).toBe("Teach 9 AM batch")
+    expect(action.taskMode).toBe("human-teach")
+    expect(action.retentionPolicyId).toBe("retain-short")
+    expect(action.guardPolicyId).toBe("approval-required")
+    expect(action.instruction).toBe("Teach 9 AM batch")
   })
 
   test("readMonEvents filters by session id", () => {

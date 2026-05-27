@@ -278,7 +278,9 @@ function syncSessionMetaFromEvent(ev: MonitorEvent): void {
   updateSessionMeta(ev.sid, (current): MonitorSessionMeta => {
     const base: MonitorSessionMeta = current || {
       artifactVersion: 2,
+      surface: "browser",
       sessionId: ev.sid!,
+      taskId: typeof ev.taskId === "string" ? ev.taskId : undefined,
       startedAt: typeof ev.t === "number" ? ev.t : Date.now(),
       status: ev.event === "mon_stop" ? "stopped" : "active",
       paused: false,
@@ -292,6 +294,8 @@ function syncSessionMetaFromEvent(ev: MonitorEvent): void {
     }
 
     if (ev.event === "mon_start") {
+      base.surface = "browser"
+      base.taskId = typeof ev.taskId === "string" ? ev.taskId : base.taskId
       base.startedAt = typeof ev.t === "number" ? ev.t : base.startedAt
       base.status = "active"
       base.paused = false

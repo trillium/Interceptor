@@ -31,6 +31,7 @@ export type MonitorEvent = {
   timestamp?: string
   event?: string
   sid?: string
+  taskId?: string
   s?: number
   t?: number
   tid?: number
@@ -69,6 +70,12 @@ export type MonitorSessionMeta = {
   // treated as "browser" by the CLI). macOS sessions write "macos".
   surface?: "browser" | "macos"
   sessionId: string
+  taskId?: string
+  taskModeAtAttach?: "human-observe" | "human-teach" | "agent-record" | "mixed"
+  taskActorAtAttach?: "human" | "agent" | "system" | "verifier" | "guard"
+  taskAttachedAt?: number
+  taskDetachedAt?: number
+  taskSourceSnapshotRoot?: string
   startedAt: number
   endedAt?: number
   status: "active" | "stopped"

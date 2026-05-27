@@ -10,6 +10,7 @@ import Foundation
 
 final class MonitorSession: @unchecked Sendable {
     let id: String
+    let taskId: String?
     let instruction: String?
     let startTime: Date
     let surface: String = "macos"
@@ -44,6 +45,7 @@ final class MonitorSession: @unchecked Sendable {
 
     init(
         id: String,
+        taskId: String?,
         instruction: String?,
         startTime: Date,
         scope: MonitorScope,
@@ -52,6 +54,7 @@ final class MonitorSession: @unchecked Sendable {
         tcc: MonitorTccSnapshot
     ) {
         self.id = id
+        self.taskId = taskId
         self.instruction = instruction
         self.startTime = startTime
         self.scope = scope
@@ -103,6 +106,7 @@ final class MonitorSession: @unchecked Sendable {
             "includes": Array(includes).sorted(),
             "excludes": Array(excludes).sorted()
         ]
+        if let taskId = taskId { meta["taskId"] = taskId }
         if let inst = instruction { meta["instruction"] = inst }
         if let pid = rootPid { meta["rootPid"] = Int(pid) }
         if let bid = rootBundleId { meta["rootBundleId"] = bid }

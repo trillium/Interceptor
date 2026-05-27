@@ -72,6 +72,7 @@ final class MonitorDomain: DomainHandler, @unchecked Sendable {
         }
 
         let instruction = action["instruction"] as? String
+        let taskId = action["taskId"] as? String
         let includes = parseSet(action["include"])
         let excludes = parseSet(action["exclude"])
         let scope = parseScope(action)
@@ -115,6 +116,7 @@ final class MonitorDomain: DomainHandler, @unchecked Sendable {
         )
         let session = MonitorSession(
             id: sid,
+            taskId: taskId,
             instruction: instruction,
             startTime: Date(),
             scope: scope,
@@ -218,6 +220,7 @@ final class MonitorDomain: DomainHandler, @unchecked Sendable {
             "tap": runtime.tapActive
         ]
         if let inst = instruction { startData["ins"] = inst }
+        if let taskId = taskId { startData["taskId"] = taskId }
         if let bid = session.rootBundleId { startData["rootBundleId"] = bid }
         if let app = session.rootAppName { startData["rootApp"] = app }
         if let pid = session.rootPid { startData["rootPid"] = Int(pid) }
@@ -231,6 +234,7 @@ final class MonitorDomain: DomainHandler, @unchecked Sendable {
             "tap": runtime.tapActive
         ]
         if let inst = instruction { ok["instruction"] = inst }
+        if let taskId = taskId { ok["taskId"] = taskId }
         ok["scope"] = scope.toDict()
         ok["includes"] = Array(includes).sorted()
         ok["sessionDir"] = Platform.sessionDir(sid)
@@ -421,6 +425,7 @@ final class MonitorDomain: DomainHandler, @unchecked Sendable {
         let lifecycle = event == "mon_start" || event == "mon_stop" || event == "mon_pause" || event == "mon_resume"
         if s.paused, !lifecycle { return }
         var enriched = data
+        if let taskId = s.taskId { enriched["taskId"] = taskId }
         enriched["s"] = s.nextSeq()
         s.tally(event: event)
         Platform.appendMonitorEvent(sid: s.id, event: event, data: enriched)

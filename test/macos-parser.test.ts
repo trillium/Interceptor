@@ -90,6 +90,24 @@ describe("macos parser", () => {
     expect(action.timeoutMs).toBe(3000)
   })
 
+  test("macos monitor start parses task metadata", () => {
+    const action = parseMacosCommand([
+      "macos", "monitor", "start",
+      "--task", "Teach Slack triage",
+      "--mode", "human-teach",
+      "--app", "Slack",
+      "--retention-policy", "retain-short",
+      "--guard-policy", "approval-required",
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_monitor")
+    expect(action.sub).toBe("start")
+    expect(action.taskRef).toBe("Teach Slack triage")
+    expect(action.taskMode).toBe("human-teach")
+    expect(action.app).toBe("Slack")
+    expect(action.retentionPolicyId).toBe("retain-short")
+    expect(action.guardPolicyId).toBe("approval-required")
+  })
+
   test("trust with no flags is read-only — no prompt fields are true", () => {
     const action = parseMacosCommand(["macos", "trust"]) as Record<string, unknown>
     expect(action.type).toBe("macos_trust")

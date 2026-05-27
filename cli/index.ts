@@ -3,6 +3,11 @@ import { parseTabFlag, parseContextFlag } from "./parse"
 import { formatState, formatTabs, formatCookies, formatResult } from "./format"
 import { sendCommand, sendCommandWs, type DaemonResult, type DaemonResponse } from "./transport"
 import { fromPassive, writeExport, type PassiveNetEntry, type ExportFormat } from "../shared/exports"
+import {
+  attachMonitorTaskSource,
+  markMonitorTaskSourceAttachFailed,
+  resolveOrCreateMonitorTask,
+} from "../shared/monitor-tasks"
 import { ensureDaemon } from "./daemon-spawn"
 import { parseStateCommand } from "./commands/state"
 import { parseActionsCommand } from "./commands/actions"
@@ -61,7 +66,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
 ])
 
 // Monitor subcommands that are handled locally (no daemon needed)
-const MONITOR_LOCAL_SUBCOMMANDS = new Set(["tail", "list", "export"])
+const MONITOR_LOCAL_SUBCOMMANDS = new Set(["tail", "list", "export", "task"])
 
 function unwrapResult(response: DaemonResponse): DaemonResult {
   return response.result
@@ -131,6 +136,9 @@ async function main() {
 
   let needsDaemon = !NO_DAEMON.has(cmd)
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
+    needsDaemon = false
+  }
+  if (cmd === "monitor" && (filtered[1] === "status" || filtered[1] === "stop") && filtered.includes("--task")) {
     needsDaemon = false
   }
 
@@ -244,6 +252,26 @@ async function main() {
     process.exit(0)
   }
 
+  let pendingMonitorTaskId: string | undefined
+  if (action?.type === "monitor_start" && typeof action.taskRef === "string") {
+    try {
+      const { task } = resolveOrCreateMonitorTask({
+        taskRef: action.taskRef,
+        mode: typeof action.taskMode === "string" ? action.taskMode : undefined,
+        instruction: typeof action.instruction === "string" ? action.instruction : undefined,
+        createdBy: "browser-monitor",
+        retentionPolicyId: typeof action.retentionPolicyId === "string" ? action.retentionPolicyId : undefined,
+        guardPolicyId: typeof action.guardPolicyId === "string" ? action.guardPolicyId : undefined,
+        verifierPolicyId: typeof action.verifierPolicyId === "string" ? action.verifierPolicyId : undefined,
+      })
+      pendingMonitorTaskId = task.taskId
+      action.taskId = task.taskId
+    } catch (err) {
+      console.error(`error: ${(err as Error).message}`)
+      process.exit(1)
+    }
+  }
+
   // Apply global modifiers
   if (anyTab) action.anyTab = true
   if (filtered.includes("--changes")) action.changes = true
@@ -257,6 +285,30 @@ async function main() {
       ? await sendCommandWs(action, globalTabId, globalContextId)
       : await sendCommand(action, globalTabId, globalContextId)
     const result = unwrapResult(response)
+    if (pendingMonitorTaskId) {
+      if (result.success) {
+        const data = (result.data || {}) as Record<string, unknown>
+        const sid = typeof data.sessionId === "string" ? data.sessionId : typeof data.sid === "string" ? data.sid : undefined
+        if (sid) {
+          try {
+            attachMonitorTaskSource(pendingMonitorTaskId, sid, {
+              surface: "browser",
+              rootTabId: typeof data.tabId === "number" ? data.tabId : undefined,
+            })
+            ;(data as Record<string, unknown>).taskId = pendingMonitorTaskId
+            result.data = data
+          } catch (err) {
+            markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, sid, (err as Error).message)
+            console.error(`error: monitor session ${sid} started but task attachment failed: ${(err as Error).message}`)
+            process.exit(1)
+          }
+        } else {
+          markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, undefined, "monitor_start response did not include sessionId")
+        }
+      } else {
+        markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, undefined, result.error || "monitor_start failed")
+      }
+    }
 
     // Screenshot save-to-disk post-processing
     if (result.success && result.data && typeof result.data === "object" &&
