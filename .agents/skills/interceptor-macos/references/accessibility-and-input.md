@@ -51,7 +51,7 @@ interceptor macos resize e1 --width 672 --height 983
 ## Compound surface for AX
 
 ```bash
-interceptor macos open "Finder"                  # Activate + tree + windows in one call
+interceptor macos open "Finder"                  # Background open + tree + windows in one call
 interceptor macos read                           # Tree + frontmost app info
 interceptor macos act e5                         # Click + wait + updated tree
 interceptor macos act e3 "hello"                 # Type + wait + updated tree

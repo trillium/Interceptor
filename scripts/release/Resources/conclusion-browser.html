@@ -77,8 +77,8 @@
 <body>
   <h2>Interceptor (Browser-Only) is installed.</h2>
 
-  <h3><span class="step-num">1</span>Load the browser extension</h3>
-  <p>Chrome and Brave do not allow installers to load extensions automatically &mdash; you have to do this once, by hand:</p>
+  <h3><span class="step-num">1</span>Load or reload the browser extension</h3>
+  <p>Chrome and Brave do not allow installers to load or refresh extensions automatically &mdash; do this once by hand, and after package updates:</p>
   <ol>
     <li>Open <code>chrome://extensions/</code> (or <code>brave://extensions/</code>)</li>
     <li>Toggle <strong>Developer mode</strong> on (top right)</li>
@@ -86,7 +86,9 @@
     <li>Select this folder:<br>
       <span class="path">/Library/Application Support/Interceptor/extension</span>
     </li>
+    <li>If Interceptor was already loaded from this folder, click its <strong>Reload</strong> button instead.</li>
   </ol>
+  <p>After the extension is connected, <code>interceptor reload</code> also refreshes the running extension service worker.</p>
 
   <h3><span class="step-num">2</span>Optional: register skill packs with your AI tooling</h3>
   <p>Interceptor ships skill packs that teach AI agents how to drive the browser surface. Find your runtime below and paste its block into a terminal. Skip the runtimes you don&rsquo;t use. Existing symlinks of the same name are replaced safely; nothing else is touched.</p>

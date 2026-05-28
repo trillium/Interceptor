@@ -1,6 +1,6 @@
 ---
 name: interceptor-macos
-description: "Drive native macOS apps via `interceptor macos *` — read AX trees, click and type with OS-level trusted input, capture occluded / minimized / cross-Space windows, run on-device speech / vision / NLP, dispatch Apple Events, monitor and replay native flows, and run bridge-local JSC host utilities. Background-first by contract — only `app activate` and `open --activate` move focus. Workflows: CaptureBackgroundedApp (occluded window screenshot), DriveBackgroundedApp (click/type on non-frontmost app), DispatchAppleEvent (Apple Events to named app), ReadAxTree (AX tree with Electron wake-up), RecordAndReplayMacFlow (native monitor flow), TrustedInputGate (OS-level trusted input). USE WHEN macOS app, native app, AX tree, Apple Events, screenshot of app, drive Finder/Mail/Cursor, occluded window, browser chrome, URL bar, system dialog, trusted input, on-device vision, on-device speech, NLP, monitor mac flow, replay native, overlay, vibrate, intent dispatch, JSC host. NOT FOR content inside a browser tab (use interceptor-browser)."
+description: "Drive native macOS apps via interceptor macos *: AX trees, background click/type/keys/drag/scroll, occluded or minimized window capture, browser chrome, URL bars, OS dialogs, Apple Events, trusted OS input, monitor/replay, overlays, vision, speech, NLP, and JSC host utilities. Background-first by contract; only app activate and open --activate move focus. Use for native apps, named browser app routing, window control, cross-app work, and system UI. Not for content inside browser pages."
 metadata:
   short-description: Drive native macOS apps via the interceptor CLI; background-first
 ---
@@ -16,7 +16,7 @@ Agent-operator skill for the macOS surface of Interceptor. Use the `interceptor 
 
 The macOS bridge is a Swift daemon launched as a LaunchAgent / `.app` bundle. Links Apple frameworks only (Accessibility, ScreenCaptureKit, AVFoundation, Speech, Vision, NaturalLanguage, OSLogStore, NSAppleScript, container runtime). No private APIs.
 
-Constitutional rules (Background-First, Surface Decision) live in [AGENTS.md](../../../AGENTS.md). This file is a dispatcher to the **Workflows** and **references** below.
+This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `/Library/Application Support/Interceptor/skills`.
 
 ## Fast Path
 
@@ -65,7 +65,7 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 
 ## When To Switch Surfaces
 
-If the target is **inside a browser page** (DOM, network, SPA state, browser monitor, scene-graph of a Canva/Docs/Slides editor) — load `interceptor-browser` instead. Decision table is in [AGENTS.md § Surface Decision](../../../AGENTS.md#surface-decision).
+If the target is **inside a browser page** (DOM, network, SPA state, browser monitor, scene graph of a rich editor) - load `interceptor-browser` instead.
 
 ## Do Not Default To Troubleshooting
 

@@ -308,9 +308,11 @@ run ditto "$REPO_ROOT/extension/dist" "$STAGING_DIR/extension/$DEST_EXTENSION_DI
 # Skill packs — shipped inside the daemon component payload at
 # /Library/Application Support/Interceptor/skills/<name>/. The conclusion
 # screen tells users to symlink these into the runtime skill dirs they use
-# (~/.claude/skills, ~/.agents/skills, etc.). Browser pkg gets the browser-
-# surface skills only; Full pkg also includes the macOS-surface skill.
+# (~/.claude/skills, ~/.agents/skills, etc.). Every pkg gets the top-level
+# router skill plus the browser-surface skill; Full pkg also includes the
+# macOS-surface skill.
 run mkdir -p "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills"
+run ditto "$REPO_ROOT/.agents/skills/interceptor" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills/interceptor"
 run ditto "$REPO_ROOT/.agents/skills/interceptor-browser" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/skills/interceptor-browser"
 
 # Bridge components only when building full mode. The Full daemon component

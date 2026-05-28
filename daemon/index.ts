@@ -11,7 +11,7 @@ import {
   type MonitorSessionMeta,
   updateSessionMeta,
 } from "../shared/monitor-artifacts"
-import { chooseOutboundTransport } from "./outbound-routing"
+import { chooseOutboundTransport, validateContextRouting } from "./outbound-routing"
 import { formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
 import { clearDaemonRuntimeFiles, decideDaemonStartupRole, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon } from "./lifecycle"
 
@@ -973,24 +973,13 @@ try {
             continue
           }
 
-          if (request.contextId && !extensionWsMap.has(request.contextId)) {
-            const available = [...extensionWsMap.keys()]
-            const hint = available.length > 0
-              ? ` (connected: ${available.join(", ")})`
-              : " (no extensions connected)"
-            socketWriteFramed(socket, JSON.stringify({
-              id,
-              result: { success: false, error: `context '${request.contextId}' not found${hint}` },
-            }))
-            continue
-          }
-
-          if (!request.contextId && extensionWsMap.size !== 1) {
-            const available = [...extensionWsMap.keys()]
-            const error = available.length === 0
-              ? "no extensions connected"
-              : `multiple extensions connected, use --context <id> (connected: ${available.join(", ")})`
-            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error } }))
+          const contextValidation = validateContextRouting({
+            contextId: request.contextId,
+            connectedContexts: [...extensionWsMap.keys()],
+            nativeRelayAvailable: !!nativeRelaySocket,
+          })
+          if (!contextValidation.ok) {
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
             continue
           }
 
@@ -1105,21 +1094,13 @@ try {
 
         const actionType = (request.action as { type?: string })?.type || "unknown"
 
-        if (request.contextId && !extensionWsMap.has(request.contextId)) {
-          const available = [...extensionWsMap.keys()]
-          const hint = available.length > 0
-            ? ` (connected: ${available.join(", ")})`
-            : " (no extensions connected)"
-          ws.send(JSON.stringify({ id, result: { success: false, error: `context '${request.contextId}' not found${hint}` } }))
-          return
-        }
-
-        if (!request.contextId && extensionWsMap.size !== 1) {
-          const available = [...extensionWsMap.keys()]
-          const error = available.length === 0
-            ? "no extensions connected"
-            : `multiple extensions connected, use --context <id> (connected: ${available.join(", ")})`
-          ws.send(JSON.stringify({ id, result: { success: false, error } }))
+        const contextValidation = validateContextRouting({
+          contextId: request.contextId,
+          connectedContexts: [...extensionWsMap.keys()],
+          nativeRelayAvailable: !!nativeRelaySocket,
+        })
+        if (!contextValidation.ok) {
+          ws.send(JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
           return
         }
 

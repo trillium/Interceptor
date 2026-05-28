@@ -5,22 +5,77 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { IS_WIN, SOCKET_PATH, PID_PATH } from "../shared/platform"
+export const MACOS_PKG_DAEMON_PATH = "/Library/Application Support/Interceptor/interceptor-daemon"
 
-const DAEMON_BINARY = IS_WIN ? "interceptor-daemon.exe" : "interceptor-daemon"
+export type DaemonBinaryCandidateOptions = {
+  platform?: string
+  execPath?: string
+  argv0?: string
+  cwd?: string
+}
 
-export function findDaemonBinary(): string | null {
-  const candidates: string[] = []
-  const exePath = resolve(process.execPath || process.argv[0] || "")
+export type FindDaemonBinaryOptions = DaemonBinaryCandidateOptions & {
+  candidates?: string[]
+  exists?: (path: string) => boolean
+}
+
+function daemonBinaryName(platform: string = process.platform): string {
+  return platform === "win32" ? "interceptor-daemon.exe" : "interceptor-daemon"
+}
+
+function resolveFrom(cwd: string, path: string): string {
+  return resolve(cwd, path)
+}
+
+export function daemonBinaryCandidates(options: DaemonBinaryCandidateOptions = {}): string[] {
+  const platform = options.platform ?? process.platform
+  const binary = daemonBinaryName(platform)
+  const cwd = options.cwd ?? process.cwd()
+  const exePath = resolveFrom(cwd, options.execPath || options.argv0 || process.execPath || process.argv[0] || "")
   const exeDir = dirname(exePath)
-  candidates.push(join(exeDir, "..", "daemon", DAEMON_BINARY))
-  candidates.push(join(exeDir, DAEMON_BINARY))
-  candidates.push(join(exeDir, "daemon", DAEMON_BINARY))
-  candidates.push(resolve("daemon", DAEMON_BINARY))
-  candidates.push(resolve("daemon", "interceptor-daemon"))
+  const candidates: string[] = []
+  candidates.push(join(exeDir, "..", "daemon", binary))
+  candidates.push(join(exeDir, binary))
+  candidates.push(join(exeDir, "daemon", binary))
+  candidates.push(resolveFrom(cwd, "daemon/" + binary))
+  candidates.push(resolveFrom(cwd, "daemon/interceptor-daemon"))
+  if (platform === "darwin") {
+    candidates.push(MACOS_PKG_DAEMON_PATH)
+  }
+  return [...new Set(candidates)]
+}
+
+export function findDaemonBinary(options: FindDaemonBinaryOptions = {}): string | null {
+  const candidates = options.candidates ?? daemonBinaryCandidates(options)
+  const pathExists = options.exists ?? existsSync
   for (const c of candidates) {
-    if (existsSync(c)) return c
+    if (pathExists(c)) return c
   }
   return null
+}
+
+export function formatMissingDaemonBinaryError(
+  candidates = daemonBinaryCandidates(),
+  platform = process.platform,
+): string {
+  const checked = candidates.map((candidate) => `  - ${candidate}`).join("\n")
+  const lines = [
+    "error: daemon not running and interceptor-daemon binary not found.",
+  ]
+
+  if (platform === "darwin") {
+    lines.push(`expected package daemon: ${MACOS_PKG_DAEMON_PATH}`)
+  }
+
+  lines.push("checked:", checked)
+
+  if (platform === "darwin") {
+    lines.push("This is the browser daemon binary, not the macOS bridge. Reinstall Interceptor or rebuild from source.")
+  } else {
+    lines.push("Reinstall Interceptor or rebuild from source.")
+  }
+
+  return lines.join("\n")
 }
 
 /**
@@ -44,7 +99,8 @@ export async function ensureDaemon(): Promise<void> {
     if (!IS_WIN) { try { unlinkSync(SOCKET_PATH) } catch {} }
     try { unlinkSync(PID_PATH) } catch {}
 
-    const resolvedDaemon = findDaemonBinary()
+    const candidates = daemonBinaryCandidates()
+    const resolvedDaemon = findDaemonBinary({ candidates })
 
     if (resolvedDaemon) {
       process.stderr.write("daemon not running — spawning...\n")
@@ -65,7 +121,7 @@ export async function ensureDaemon(): Promise<void> {
         process.exit(1)
       }
     } else {
-      console.error("error: daemon not running and interceptor-daemon binary not found. Open Chrome with the Interceptor extension loaded, or build the daemon.")
+      console.error(formatMissingDaemonBinaryError(candidates))
       process.exit(1)
     }
   }

@@ -1,6 +1,6 @@
 ---
 name: interceptor-browser
-description: "Drive a real signed-in Chrome / Brave session via the `interceptor` CLI — read pages, click and type, navigate, observe network, automate rich editors (Canva / Google Docs / Slides), record and replay flows. Use compound commands (open, read, act, inspect) over low-level verbs. Structured reads over screenshots. Supports named contexts (--context <id>) for routing commands to a specific browser profile when multiple are connected. Workflows: VerifyDeploy (open URL and confirm rendering), ReadAndExtract (page + SPA state), DriveRichEditor (Canva/Docs/Slides scene workflow), OverrideXhr (request mutation), CapturePageCommunication (WebSocket/Beacon/BroadcastChannel), RecordAndReplay (monitor flow + export plan), ScreenshotForVlm (VLM-budgeted screenshot), MultiPageCompare (multi-page fact comparison). USE WHEN verify deploy, check page, read DOM, click, type, fill form, drive editor, override request, capture WebSocket, capture Beacon, capture BroadcastChannel, record flow, replay flow, screenshot for VLM, browser automation, SPA extraction, compare pages, multi-page comparison, designed by X vs Y, facts across N pages, cross-account testing, multi-profile routing. NOT FOR native macOS apps (use interceptor-macos), OS dialogs, browser chrome, or multi-page scraping at scale (use a crawler)."
+description: "Drive a signed-in Chrome / Brave session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser profiles with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native macOS apps, OS dialogs, browser chrome, or large scraping."
 metadata:
   short-description: Drive a real signed-in Chrome / Brave session via the interceptor CLI
 ---
@@ -9,13 +9,23 @@ metadata:
 
 Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome / Brave session: pages, network, scene graph, monitor, screenshots. For native macOS apps load `interceptor-macos` instead.
 
-Constitutional rules (Input Layer Priority, Screenshot defaults, Surface Decision, `--json` discipline) live in [AGENTS.md](../../../AGENTS.md). This file is a dispatcher to the **Workflows** and **references** below — it does not restate the rules.
+This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `/Library/Application Support/Interceptor/skills`.
+
+## Core Rules
+
+- Use compound commands (`open`, `read`, `act`, `inspect`) before low-level verbs.
+- Browser commands operate inside the cyan `interceptor` tab group. Do not use `--any-tab` unless the user explicitly authorizes acting outside that group.
+- `interceptor open <url>` and `interceptor tab new <url>` create background tabs by default. Only `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus.
+- If multiple browser profiles are connected, run `interceptor contexts` and pass `--context <id>`.
+- Prefer structured reads (`read`, `tree`, `text`, `inspect`, `scene`) before screenshots. Open `references/screenshot-policy.md` before screenshot-heavy work.
+- Default to plain text output. Use `--json` only when piping into scripts or when a downstream tool needs a machine-readable contract.
+- If an already-loaded unpacked extension behaves stale after a package update, reload it from `chrome://extensions` or `brave://extensions`, or run `interceptor reload` once the extension is reachable.
 
 ## Fast Path
 
 ```bash
 interceptor status                        # 1. Confirm daemon + extension are alive
-interceptor open "https://example.com"    # 2. Compound open: tab + wait + tree + text
+interceptor open "https://example.com"    # 2. Background tab + wait + tree + text
 interceptor read                          # 3. Current state (re-read after any mutation)
 interceptor act e5                        # 4. Click ref e5 (refs come from `read`)
 interceptor act e7 "example user"         # 5. Type into ref e7
@@ -52,7 +62,7 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 
 ## When To Switch Surfaces
 
-If the target is **outside the page** — a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any non-browser macOS app — load `interceptor-macos` instead. Decision table is in [AGENTS.md § Surface Decision](../../../AGENTS.md#surface-decision).
+If the target is **outside the page** - a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any non-browser macOS app - load `interceptor-macos` instead.
 
 ## Do Not Default To Troubleshooting
 

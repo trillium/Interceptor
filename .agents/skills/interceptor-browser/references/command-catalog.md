@@ -149,7 +149,8 @@ interceptor wait 1000
 interceptor wait-stable
 
 interceptor tabs
-interceptor tab new <url>
+interceptor tab new <url>             # Background tab in the interceptor group
+interceptor tab new <url> --activate  # Explicit foregrounding
 interceptor tab switch <tab-id>
 interceptor tab close <tab-id>
 interceptor window list
