@@ -49,7 +49,7 @@ If you're at command 3 and don't have the verdict, **re-read once with a narrowe
 
 ## When to escalate to a screenshot
 
-Only when pixels are the answer (visual layout, color, chart artifact). Use `Workflows/ScreenshotForVlm.md` — the agent-default recipe keeps the file small and on-disk.
+Only when pixels are the answer (visual layout, color, chart artifact). Use `workflows/screenshot-for-vlm.md` — the agent-default recipe keeps the file small and on-disk.
 
 ## Common pitfalls
 

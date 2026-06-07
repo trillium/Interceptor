@@ -40,14 +40,14 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 
 | Workflow | When to invoke |
 |---|---|
-| [`Workflows/VerifyDeploy.md`](Workflows/VerifyDeploy.md) | "Verify the deploy", "check that X works on the page", reproducing a bug before touching code |
-| [`Workflows/ReadAndExtract.md`](Workflows/ReadAndExtract.md) | Compound page read + SPA state extraction — pull a specific value off a page |
-| [`Workflows/DriveRichEditor.md`](Workflows/DriveRichEditor.md) | Canva, Google Docs, Google Slides, design-tool layer manipulation — anything where DOM refs aren't enough |
-| [`Workflows/OverrideXhr.md`](Workflows/OverrideXhr.md) | Mutate a request before it hits the server — change params, force a status, throttle |
-| [`Workflows/CapturePageCommunication.md`](Workflows/CapturePageCommunication.md) | Capture WebSocket, Beacon, and BroadcastChannel activity without CDP |
-| [`Workflows/RecordAndReplay.md`](Workflows/RecordAndReplay.md) | Learn a real user flow, export a replay plan, run it back |
-| [`Workflows/ScreenshotForVlm.md`](Workflows/ScreenshotForVlm.md) | Take a screenshot the model will actually understand — VLM-budgeted, WebP, on-disk |
-| [`Workflows/MultiPageCompare.md`](Workflows/MultiPageCompare.md) | Compare facts across multiple pages (e.g. "who designed Python vs JavaScript") — sequential `open --text-only` per page |
+| [`workflows/verify-deploy.md`](workflows/verify-deploy.md) | "Verify the deploy", "check that X works on the page", reproducing a bug before touching code |
+| [`workflows/read-and-extract.md`](workflows/read-and-extract.md) | Compound page read + SPA state extraction — pull a specific value off a page |
+| [`workflows/drive-rich-editor.md`](workflows/drive-rich-editor.md) | Canva, Google Docs, Google Slides, design-tool layer manipulation — anything where DOM refs aren't enough |
+| [`workflows/override-xhr.md`](workflows/override-xhr.md) | Mutate a request before it hits the server — change params, force a status, throttle |
+| [`workflows/capture-page-communication.md`](workflows/capture-page-communication.md) | Capture WebSocket, Beacon, and BroadcastChannel activity without CDP |
+| [`workflows/record-and-replay.md`](workflows/record-and-replay.md) | Learn a real user flow, export a replay plan, run it back |
+| [`workflows/screenshot-for-vlm.md`](workflows/screenshot-for-vlm.md) | Take a screenshot the model will actually understand — VLM-budgeted, WebP, on-disk |
+| [`workflows/multi-page-compare.md`](workflows/multi-page-compare.md) | Compare facts across multiple pages (e.g. "who designed Python vs JavaScript") — sequential `open --text-only` per page |
 
 ## References
 

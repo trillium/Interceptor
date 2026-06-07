@@ -1,6 +1,6 @@
 # Interceptor Agent Manual
 
-Agent operating manual for the `interceptor` CLI: drive a real browser session and native macOS apps. For user-facing overview see [README.md](README.md). For implementation details see [ARCHITECTURE.md](ARCHITECTURE.md). For deep references, command catalogs, and per-task workflows, see [`.agents/skills/interceptor-browser/`](.agents/skills/interceptor-browser/) and [`.agents/skills/interceptor-macos/`](.agents/skills/interceptor-macos/).
+Agent operating manual for the `interceptor` CLI: drive a real browser session and native macOS apps. For user-facing overview see [README.md](README.md). For implementation details see [ARCHITECTURE.md](ARCHITECTURE.md). For deep references, command catalogs, and per-task workflows, see [`.agents/skills/interceptor-browser/`](.agents/skills/interceptor-browser/) and [`.agents/skills/interceptor-macos/`](.agents/skills/interceptor-macos/). For deep web research — investigating a topic across many sources with breadth + verification — see [`.agents/skills/interceptor-research/`](.agents/skills/interceptor-research/) or run `interceptor research` for the playbook.
 
 ## Install Modes
 
@@ -54,6 +54,7 @@ Full contract + verb inventory + worked examples + pitfalls: [`.agents/skills/in
 |---|---|
 | Page content (DOM, network, scene graph, browser monitor, screenshot of current tab) | `interceptor-browser` |
 | Native apps, OS dialogs, browser chrome (URL bar, menus), occluded/minimized windows, cross-app routing | `interceptor-macos` |
+| Deep web research: investigate a topic across many sources (planner loop, source ledger, verification) | `interceptor-research` (run `interceptor research`) |
 | User said "open in Brave / Mail / X" (any specific named app) | `interceptor-macos` (Apple Events) |
 | Visual overlays / HUDs above all apps | `interceptor-macos` (overlay via NSPanel above compositor) |
 
@@ -90,6 +91,6 @@ Deep mechanic notes (the `userActivation` override + `__interceptor_trust` marke
 ## Repository Maintenance
 
 - This file is agent-facing. Keep it rule-shaped. No internal planning IDs, no command catalogs, no deep mechanic explanations.
-- Per-task procedures live in `.agents/skills/*/Workflows/`. Reference content lives in `.agents/skills/*/references/`. Not here.
+- Per-task procedures live in `.agents/skills/*/workflows/`. Reference content lives in `.agents/skills/*/references/`. Not here.
 - Update this file when an agent-facing **rule** changes, not when a CLI command is added or renamed (that's a `references/command-catalog.md` change).
 - Conventions for skills, frontmatter, sizes, and names are codified in `.agents/rules/README.md` and enforced in review.

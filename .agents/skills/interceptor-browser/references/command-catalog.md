@@ -1,6 +1,6 @@
 # Browser Command Catalog
 
-Full surface for `interceptor` (no prefix). Reference doc — load when you need flag-level detail. For task procedures, see `Workflows/`. For the input-layer routing rules, see `browser-and-network.md`.
+Full surface for `interceptor` (no prefix). Reference doc — load when you need flag-level detail. For task procedures, see `workflows/`. For the input-layer routing rules, see `browser-and-network.md`.
 
 ## Open + Read
 

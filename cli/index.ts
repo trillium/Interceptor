@@ -27,6 +27,7 @@ import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
+import { runResearchCommand } from "./commands/research"
 import { VERSION, BUILD_SHA, BUILD_DATE } from "./version"
 import { buildFilteredArgs } from "./global-flags"
 
@@ -49,10 +50,12 @@ const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const INIT_CMDS = new Set(["init"])
+const RESEARCH_CMDS = new Set(["research"])
 
 // Commands that don't require a daemon connection (or, in init's case,
 // bootstrap it themselves rather than relying on the pre-dispatch auto-spawn).
-const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "init"])
+// `research` prints guidance / manages an on-disk ledger — no browser, no daemon.
+const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "init", "research"])
 
 // Every command the CLI dispatches. Used to reject unknown commands
 // before any daemon-spawning side effect runs.
@@ -61,7 +64,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
-  ...UPGRADE_CMDS, ...INIT_CMDS,
+  ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS,
   "help", "contexts",
 ])
 
@@ -161,6 +164,11 @@ async function main() {
 
   if (INIT_CMDS.has(cmd)) {
     await runInitCommand(filtered)
+    return
+  }
+
+  if (RESEARCH_CMDS.has(cmd)) {
+    await runResearchCommand(filtered, jsonMode)
     return
   }
 

@@ -9,9 +9,21 @@ export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT |
 // Speech permission prompts are async and user-bounded; 15s is too short
 // for first-time `listen start` / `vad start`. 60s covers the documented
 // user-prompt UX while preserving the normal timeout for other verbs.
+//
+// Render/vision capture (screenshot, canvas read/ocr/diff, capture frame) can
+// exceed 15s on a heavy chart/image page or when the browser is under load —
+// which previously made an agent give up on reading a number trapped in a
+// chart and fall back to a weaker secondary source. 45s lets the vision rung
+// of the deep-research escalation chain actually complete.
 const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   macos_listen: 60_000,
   macos_vad: 60_000,
+  screenshot: 45_000,
+  screenshot_background: 45_000,
+  canvas_read: 45_000,
+  canvas_ocr: 45_000,
+  canvas_diff: 45_000,
+  capture_frame: 45_000,
 }
 
 function pickTimeoutForAction(actionType: string): number {

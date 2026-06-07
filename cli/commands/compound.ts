@@ -9,6 +9,7 @@
 import { sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
 import { parseElementTarget } from "../parse"
 import { hasTrustedFlag } from "./flags"
+import { maybeEmitResearchHint } from "./research"
 
 type Action = { type: string; [key: string]: unknown }
 type Result = { success: boolean; error?: string; data?: unknown; tabId?: number }
@@ -247,6 +248,11 @@ export async function runOpen(
     parts.push(textContent)
   }
   console.log(parts.join("\n"))
+
+  // Layer C: one rate-limited, opt-out hint to stderr when an agent opens a
+  // search engine and no research ledger is active. Information, not coercion —
+  // it changes nothing about the command's behavior or output.
+  maybeEmitResearchHint(url, filtered)
 }
 
 // ── interceptor read [ref] ──────────────────────────────────────────────────────────

@@ -43,12 +43,13 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 
 | Workflow | When to invoke |
 |---|---|
-| [`Workflows/CaptureBackgroundedApp.md`](Workflows/CaptureBackgroundedApp.md) | Screenshot an occluded / minimized / cross-Space window — without activating it |
-| [`Workflows/DriveBackgroundedApp.md`](Workflows/DriveBackgroundedApp.md) | Click / type / keys / drag against a non-frontmost app via AX + `postToPid` |
-| [`Workflows/DispatchAppleEvent.md`](Workflows/DispatchAppleEvent.md) | Apple Events to a named bundle id — open URL in Brave, read active tab, etc. |
-| [`Workflows/ReadAxTree.md`](Workflows/ReadAxTree.md) | `tree --app` of any app, with automatic Electron wake-up |
-| [`Workflows/RecordAndReplayMacFlow.md`](Workflows/RecordAndReplayMacFlow.md) | `macos monitor` record + export + replay native UI flows |
-| [`Workflows/TrustedInputGate.md`](Workflows/TrustedInputGate.md) | Satisfy an OS-level trusted-input gate that filters synthetic CGEvents |
+| [`workflows/capture-backgrounded-app.md`](workflows/capture-backgrounded-app.md) | Screenshot an occluded / minimized / cross-Space window — without activating it |
+| [`workflows/drive-backgrounded-app.md`](workflows/drive-backgrounded-app.md) | Click / type / keys / drag against a non-frontmost app via AX + `postToPid` |
+| [`workflows/dispatch-apple-event.md`](workflows/dispatch-apple-event.md) | Apple Events to a named bundle id — open URL in Brave, read active tab, etc. |
+| [`workflows/read-ax-tree.md`](workflows/read-ax-tree.md) | `tree --app` of any app, with automatic Electron wake-up |
+| [`workflows/record-and-replay-mac-flow.md`](workflows/record-and-replay-mac-flow.md) | `macos monitor` record + export + replay native UI flows |
+| [`workflows/trusted-input-gate.md`](workflows/trusted-input-gate.md) | Satisfy an OS-level trusted-input gate that filters synthetic CGEvents |
+| [`workflows/clear-human-verification-gate.md`](workflows/clear-human-verification-gate.md) | Clear a CAPTCHA / human-verification gate (reCAPTCHA, Turnstile, hCaptcha, generic) in the user's own signed-in session via cross-origin widget coordinate mapping + trusted `--os` click |
 
 ## References
 

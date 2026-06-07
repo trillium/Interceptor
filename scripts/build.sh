@@ -104,7 +104,7 @@ build_windows() {
   # the only working build today. CAVEAT: the resulting .exe needs an
   # AVX2-capable CPU (≈ any machine from 2013+); on hardware without AVX2 it
   # crashes at launch with "Illegal instruction". Revisit -baseline once bun
-  # ships a working baseline Windows artifact. See PRD-90 F4.
+  # ships a working baseline Windows artifact.
   echo "Building CLI (Windows x64)..."
   bun build cli/index.ts --compile --target=bun-windows-x64 --outfile=dist/interceptor.exe
   echo "Building daemon (Windows x64)..."

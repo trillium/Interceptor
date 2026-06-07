@@ -220,7 +220,7 @@ describe("install browser selection — dry-run", () => {
  * coverage for the Edge + Vivaldi vendors added by PR #75.
  *
  * Both browsers are macOS-only in this revision (Linux support deferred to a
- * follow-up PRD per a follow-up). Each test is gated on Darwin so CI on Linux
+ * follow-up). Each test is gated on Darwin so CI on Linux
  * stays green, and on the `.app` bundle's presence so a maintainer Mac without
  * Edge/Vivaldi installed also stays green.
  *

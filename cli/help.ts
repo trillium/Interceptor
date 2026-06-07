@@ -57,6 +57,15 @@ Compound (agent-optimized):
   interceptor inspect                        Tree + text + network log + headers
   interceptor inspect --net-only             Skip tree/text, return only network data
 
+Research (deep-research mode — local, no daemon, no browser):
+  interceptor research                       Print the one-screen deep-research playbook + rubric
+  interceptor research --full                Print the extended playbook + verb cookbook
+  interceptor research init <slug>           Scaffold a source ledger (links.json, insights.md, sources/)
+  interceptor research init <slug> --effort quick|standard|exhaustive   Set the breadth floor (8 / 20 / 40)
+  interceptor research add <url> --note "..."  Append a lead to the ledger
+  interceptor research note "<insight>"      Append a running insight
+  interceptor research status [<slug>]       Rubric readout: sources vs floor, domains, saturation, verdict
+
 State:
   interceptor state                          Current page DOM tree + metadata
   interceptor state --full                   Include static text content

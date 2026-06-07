@@ -18,6 +18,7 @@ Use this as the routing skill before loading a surface-specific skill.
 | Native macOS apps, OS dialogs, browser chrome, URL bars, app windows, menu bars | `interceptor-macos` |
 | Open or control a named app such as Brave, Mail, Finder, Signal, or Cursor | `interceptor-macos` |
 | Backgrounded, occluded, minimized, or cross-Space app capture | `interceptor-macos` |
+| Deep web research: investigate a topic across many sources with breadth + verification | `interceptor-research` |
 
 ## Core Rules
 
@@ -32,3 +33,4 @@ Use this as the routing skill before loading a surface-specific skill.
 
 - Load `interceptor-browser` for browser page content, network, tabs, scene graphs, and browser screenshots.
 - Load `interceptor-macos` for native apps, browser chrome, OS dialogs, window capture, AX trees, and Apple Events.
+- Load `interceptor-research` for deep web research — investigating a topic across many sources with a planner loop, an on-disk source ledger, and adversarial verification (methodology layered on the browser surface). Pull the playbook any time with `interceptor research`.

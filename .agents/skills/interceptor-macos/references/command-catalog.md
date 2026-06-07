@@ -1,6 +1,6 @@
 # macOS Command Catalog
 
-Full surface for `interceptor macos *`. Reference doc — load when you need flag-level detail. For task procedures, see `Workflows/`. For the background-first contract that governs all input verbs, see `background-first.md`.
+Full surface for `interceptor macos *`. Reference doc — load when you need flag-level detail. For task procedures, see `workflows/`. For the background-first contract that governs all input verbs, see `background-first.md`.
 
 ## Compound
 

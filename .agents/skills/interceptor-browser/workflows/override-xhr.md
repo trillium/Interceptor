@@ -61,7 +61,7 @@ CDP attach shows a "DevTools is debugging this tab" banner. Pages that watch for
 
 For WebSocket, Beacon, or BroadcastChannel observation, use
 `interceptor net page-comm log` or
-[`CapturePageCommunication.md`](CapturePageCommunication.md) before CDP.
+[`capture-page-communication.md`](capture-page-communication.md) before CDP.
 
 ## Pitfalls
 

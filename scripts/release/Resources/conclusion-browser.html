@@ -91,27 +91,31 @@
   <p>After the extension is connected, <code>interceptor reload</code> also refreshes the running extension service worker.</p>
 
   <h3><span class="step-num">2</span>Optional: register skill packs with your AI tooling</h3>
-  <p>Interceptor ships skill packs that teach AI agents how to drive the browser surface. Find your runtime below and paste its block into a terminal. Skip the runtimes you don&rsquo;t use. Existing symlinks of the same name are replaced safely; nothing else is touched.</p>
+  <p>Interceptor ships skill packs that teach AI agents how to drive the browser surface and how to research deeply (the <code>interceptor-research</code> methodology skill). Find your runtime below and paste its block into a terminal. Skip the runtimes you don&rsquo;t use. Existing symlinks of the same name are replaced safely; nothing else is touched.</p>
 
   <h4>Claude Code &mdash; <code>~/.claude/skills</code></h4>
   <pre class="cmd">mkdir -p ~/.claude/skills
 ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.claude/skills/interceptor
-ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.claude/skills/interceptor-browser</pre>
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.claude/skills/interceptor-browser
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-research" ~/.claude/skills/interceptor-research</pre>
 
   <h4>Codex &mdash; <code>~/.agents/skills</code></h4>
   <pre class="cmd">mkdir -p ~/.agents/skills
 ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.agents/skills/interceptor
-ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.agents/skills/interceptor-browser</pre>
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.agents/skills/interceptor-browser
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-research" ~/.agents/skills/interceptor-research</pre>
 
   <h4>OpenClaw &mdash; <code>~/.openclaw/skills</code></h4>
   <pre class="cmd">mkdir -p ~/.openclaw/skills
 ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.openclaw/skills/interceptor
-ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.openclaw/skills/interceptor-browser</pre>
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.openclaw/skills/interceptor-browser
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-research" ~/.openclaw/skills/interceptor-research</pre>
 
   <h4>OpenCode &mdash; <code>~/.config/opencode/skills</code></h4>
   <pre class="cmd">mkdir -p ~/.config/opencode/skills
 ln -sfn "/Library/Application Support/Interceptor/skills/interceptor" ~/.config/opencode/skills/interceptor
-ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.config/opencode/skills/interceptor-browser</pre>
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-browser" ~/.config/opencode/skills/interceptor-browser
+ln -sfn "/Library/Application Support/Interceptor/skills/interceptor-research" ~/.config/opencode/skills/interceptor-research</pre>
 
   <h3>Try it</h3>
   <p>Open a terminal and run:</p>

@@ -40,8 +40,8 @@ If a page returns the wrong section (table-of-contents instead of the article bo
 
 ## When NOT to use this workflow
 
-- **Single-page tasks** — use `ReadAndExtract.md`. This workflow is for ≥ 2 pages.
-- **Tasks where the answer requires clicking something on each page** — use `ReadAndExtract.md` or `VerifyDeploy.md` with `--tree-only --tree-format compact` instead. Multi-page-compare assumes the prose contains the answer.
+- **Single-page tasks** — use `read-and-extract.md`. This workflow is for ≥ 2 pages.
+- **Tasks where the answer requires clicking something on each page** — use `read-and-extract.md` or `verify-deploy.md` with `--tree-only --tree-format compact` instead. Multi-page-compare assumes the prose contains the answer.
 - **Pages behind auth or with heavy JS rendering** — `--text-only` may miss content loaded after first paint. Fall back to full `read` for those specific pages, but stay sequential (one page at a time).
 
 ## Output format

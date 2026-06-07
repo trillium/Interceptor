@@ -74,4 +74,4 @@ Default DOM-render works from a backgrounded Chrome on a different macOS Space �
 
 - `command-catalog.md` — full command surface
 - `browser-and-network.md` — input layer priority and the `__interceptor_trust` marker
-- `Workflows/ScreenshotForVlm.md` — the task procedure that uses this policy
+- `workflows/screenshot-for-vlm.md` — the task procedure that uses this policy
