@@ -1,7 +1,7 @@
 import { unlinkSync, existsSync, appendFileSync, statSync, readFileSync, writeFileSync } from "node:fs"
 import { spawn, spawnSync } from "node:child_process"
 import { osClick, osKey, osType, osMove, generateBezierPath, translateCoords } from "./os-input-loader"
-import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, transportLabel } from "../shared/platform"
+import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOCK_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, transportLabel } from "../shared/platform"
 import {
   MONITOR_EVENT_NAMES,
   appendSessionEvent,
@@ -13,7 +13,8 @@ import {
 } from "../shared/monitor-artifacts"
 import { chooseOutboundTransport, validateContextRouting } from "./outbound-routing"
 import { formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
-import { clearDaemonRuntimeFiles, decideDaemonStartupRole, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon } from "./lifecycle"
+import { clearDaemonRuntimeFiles, checkLockFileDuplicate, clearLockFile, decideDaemonStartupRole, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
+import { VERSION } from "../cli/version"
 
 // ── Native Bridge (interceptor-bridge) connection ────────────────────────────────
 const BRIDGE_SOCKET_PATH = "/tmp/interceptor-bridge.sock"
@@ -454,13 +455,25 @@ async function startNativeRelay(existingPid: number): Promise<never> {
 
 function lifecycleDeps() {
   return {
-    ...defaultLifecycleDeps({ pidPath: PID_PATH, socketPath: SOCKET_PATH, isWin: IS_WIN }),
+    ...defaultLifecycleDeps({ pidPath: PID_PATH, lockPath: LOCK_PATH, socketPath: SOCKET_PATH, isWin: IS_WIN }),
     log,
   }
 }
 
 async function bootstrapDaemonRole(): Promise<void> {
   const deps = lifecycleDeps()
+
+  // Check lock file for a live duplicate before checking PID state.
+  // Two --standalone daemons will both have valid PID files pointing to
+  // themselves; only the lock file reveals that another real instance exists.
+  const duplicate = checkLockFileDuplicate(LOCK_PATH, process.pid, process.kill.bind(process))
+  if (duplicate) {
+    const msg = `duplicate daemon already running (pid ${duplicate.pid}, started ${duplicate.startedAt}). Run \`interceptor kill\` to clean up.`
+    log(msg)
+    process.stderr.write(`interceptor-daemon: ${msg}\n`)
+    process.exit(1)
+  }
+
   const state = readPidState(deps)
   const decision = decideDaemonStartupRole(STANDALONE, state)
 
@@ -487,6 +500,20 @@ async function bootstrapDaemonRole(): Promise<void> {
 }
 
 await bootstrapDaemonRole()
+
+// Write lock file — authoritative record of this running instance.
+writeLockFile(LOCK_PATH, {
+  pid: process.pid,
+  version: VERSION,
+  execPath: process.execPath,
+  startedAt: new Date().toISOString(),
+  socketPath: SOCKET_PATH,
+  wsPort: WS_PORT,
+  mode: STANDALONE ? "standalone" : "relay",
+})
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(sig, () => { clearLockFile(LOCK_PATH); process.exit(0) })
+}
 
 try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH) } catch {}
 
