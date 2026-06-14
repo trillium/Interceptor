@@ -115,7 +115,22 @@ export function buildA11yTree(
 
   function walk(el: Element, d: number) {
     if (d > maxDepth) return
-    if (!isVisible(el) && el.tagName !== "BODY") return
+
+    // Visibility disposition. `display:none` / `visibility:hidden` hide the
+    // whole subtree, so we stop. But an element that's invisible only because
+    // it's an out-of-flow wrapper with a zero-area box — e.g. a portal / popper
+    // container (Radix, Floating UI) before it has been positioned — must still
+    // be descended into: its positioned descendants render elsewhere and are
+    // visibility-checked individually. In-flow invisible elements (collapsed or
+    // empty) are pruned as before. The element itself is only emitted when it is
+    // actually visible.
+    const selfVisible = el.tagName === "BODY" || isVisible(el)
+    if (!selfVisible) {
+      const style = getComputedStyle(el)
+      if (style.display === "none" || style.visibility === "hidden") return
+      const pos = style.position
+      if (pos !== "fixed" && pos !== "absolute" && pos !== "sticky") return
+    }
 
     const role = getEffectiveRole(el)
     const tag = el.tagName.toLowerCase()
@@ -124,7 +139,7 @@ export function buildA11yTree(
     const isInteractiveEl = isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES)
     const prefix = compact ? ">".repeat(d) : "  ".repeat(d)
 
-    if (isLandmark && !isInteractiveEl) {
+    if (selfVisible && isLandmark && !isInteractiveEl) {
       const name = getAccessibleName(el)
       const hasName = !!name && name !== (el.textContent || "").trim().slice(0, 80)
       if (compact) {
@@ -135,7 +150,7 @@ export function buildA11yTree(
       }
     }
 
-    if (isHeading && filter === "all") {
+    if (selfVisible && isHeading && filter === "all") {
       const name = getAccessibleName(el)
       if (compact) {
         lines.push(`${prefix}heading|${name}`)
@@ -144,7 +159,7 @@ export function buildA11yTree(
       }
     }
 
-    if (isInteractiveEl) {
+    if (selfVisible && isInteractiveEl) {
       const refId = getOrAssignRef(el)
       const name = getAccessibleName(el)
       const attrs = getRelevantAttrs(el)
@@ -166,13 +181,13 @@ export function buildA11yTree(
     if (shadow) {
       const shadowPrefix = compact ? ">".repeat(d + 1) : `${prefix}  `
       lines.push(`${shadowPrefix}shadow-root`)
-      for (const child of shadow.children) {
+      for (const child of Array.from(shadow.children)) {
         walk(child, d + 2)
       }
     }
 
-    for (const child of el.children) {
-      walk(child, isLandmark ? d + 1 : d)
+    for (const child of Array.from(el.children)) {
+      walk(child, isLandmark && selfVisible ? d + 1 : d)
     }
   }
 
