@@ -48,7 +48,12 @@ nm_dir_for() {
     Darwin:chrome-beta)        echo "$HOME/Library/Application Support/Google/Chrome Beta/NativeMessagingHosts" ;;
     Darwin:chrome-canary)      echo "$HOME/Library/Application Support/Google/Chrome Canary/NativeMessagingHosts" ;;
     Darwin:chrome-dev)         echo "$HOME/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts" ;;
-    Darwin:chrome-for-testing) echo "$HOME/Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts" ;;
+    # Chrome for Testing separated its native-messaging host dir from its user-data
+    # dir as of Chrome 146: hosts now live under ~/.../Google/ChromeForTesting/
+    # (no spaces), NOT under the user-data dir "Google/Chrome for Testing". Verified
+    # against the Chrome native-messaging docs; the dispatch (Step 2) also writes the
+    # legacy profile-relative path as a hedge for older builds.
+    Darwin:chrome-for-testing) echo "$HOME/Library/Application Support/Google/ChromeForTesting/NativeMessagingHosts" ;;
     Darwin:edge)               echo "$HOME/Library/Application Support/Microsoft Edge/NativeMessagingHosts" ;;
     Darwin:vivaldi)            echo "$HOME/Library/Application Support/Vivaldi/NativeMessagingHosts" ;;
     Linux:brave)               echo "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" ;;
@@ -280,20 +285,25 @@ if [[ -z "$BROWSER" ]]; then
     exit 1
   fi
 
+  # First installed browser in priority order — the non-interactive default and the
+  # interactive prompt default, so we never default to a browser that isn't actually
+  # installed (e.g. stable Chrome on a Beta-only host).
+  if   [[ "$CHROME_INSTALLED"             == "1" ]]; then DEFAULT_BROWSER="chrome"
+  elif [[ "$CHROME_BETA_INSTALLED"        == "1" ]]; then DEFAULT_BROWSER="chrome-beta"
+  elif [[ "$CHROME_CANARY_INSTALLED"      == "1" ]]; then DEFAULT_BROWSER="chrome-canary"
+  elif [[ "$CHROME_DEV_INSTALLED"         == "1" ]]; then DEFAULT_BROWSER="chrome-dev"
+  elif [[ "$CHROME_FOR_TESTING_INSTALLED" == "1" ]]; then DEFAULT_BROWSER="chrome-for-testing"
+  elif [[ "$BRAVE_INSTALLED"              == "1" ]]; then DEFAULT_BROWSER="brave"
+  elif [[ "$EDGE_INSTALLED"               == "1" ]]; then DEFAULT_BROWSER="edge"
+  else                                                    DEFAULT_BROWSER="vivaldi"
+  fi
+
   if (( TOTAL_INSTALLED == 1 )); then
-    if   [[ "$CHROME_INSTALLED"             == "1" ]]; then BROWSER="chrome"
-    elif [[ "$CHROME_BETA_INSTALLED"        == "1" ]]; then BROWSER="chrome-beta"
-    elif [[ "$CHROME_CANARY_INSTALLED"      == "1" ]]; then BROWSER="chrome-canary"
-    elif [[ "$CHROME_DEV_INSTALLED"         == "1" ]]; then BROWSER="chrome-dev"
-    elif [[ "$CHROME_FOR_TESTING_INSTALLED" == "1" ]]; then BROWSER="chrome-for-testing"
-    elif [[ "$BRAVE_INSTALLED"              == "1" ]]; then BROWSER="brave"
-    elif [[ "$EDGE_INSTALLED"               == "1" ]]; then BROWSER="edge"
-    else                                                    BROWSER="vivaldi"
-    fi
+    BROWSER="$DEFAULT_BROWSER"
     echo "==> Browser: $BROWSER (only supported browser found)"
   elif [[ "$DRY_RUN" == "1" || ! -t 0 ]]; then
-    BROWSER="chrome"
-    echo "==> Browser not specified; defaulting to '$BROWSER' (non-interactive)."
+    BROWSER="$DEFAULT_BROWSER"
+    echo "==> Browser not specified; defaulting to '$BROWSER' (non-interactive, first installed)."
   else
     echo ""
     echo "Choose target browser:"
@@ -307,8 +317,8 @@ if [[ -z "$BROWSER" ]]; then
     [[ "$VIVALDI_INSTALLED"            == "1" ]] && echo "  vivaldi             Vivaldi"
     [[ "$CHROME_INSTALLED" == "1" && "$BRAVE_INSTALLED" == "1" ]] && echo "  both                Chrome (stable) and Brave"
     echo ""
-    read -r -p "Browser (default: chrome): " ANSWER
-    ANSWER="${ANSWER:-chrome}"
+    read -r -p "Browser (default: $DEFAULT_BROWSER): " ANSWER
+    ANSWER="${ANSWER:-$DEFAULT_BROWSER}"
     case "$ANSWER" in
       chrome|chrome-beta|chrome-canary|chrome-dev|chrome-for-testing|brave|edge|vivaldi|both) BROWSER="$ANSWER" ;;
       *)
@@ -348,7 +358,15 @@ case "$BROWSER" in
   chrome-beta)        NM_DIRS+=("$(nm_dir_for chrome-beta)") ;;
   chrome-canary)      NM_DIRS+=("$(nm_dir_for chrome-canary)") ;;
   chrome-dev)         NM_DIRS+=("$(nm_dir_for chrome-dev)") ;;
-  chrome-for-testing) NM_DIRS+=("$(nm_dir_for chrome-for-testing)") ;;
+  chrome-for-testing)
+    # Chrome 146 moved Chrome for Testing's native-messaging host lookup to a
+    # dedicated dir (Google/ChromeForTesting/). Write that (canonical for 146+) and
+    # ALSO the user-data-dir/NativeMessagingHosts path as a defensive hedge for older
+    # builds / alternate lookups — mirrors how other native-messaging tooling handles
+    # this boundary. The two targets are distinct dirs, so no double-write.
+    NM_DIRS+=("$(nm_dir_for chrome-for-testing)")
+    NM_DIRS+=("$HOME/Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts")
+    ;;
   brave)              NM_DIRS+=("$(nm_dir_for brave)") ;;
   edge)               NM_DIRS+=("$(nm_dir_for edge)") ;;
   vivaldi)            NM_DIRS+=("$(nm_dir_for vivaldi)") ;;
@@ -372,7 +390,7 @@ for dir in "${NM_DIRS[@]}"; do
       *Google/Chrome\ Beta*)             echo "    Chrome Beta:        $dir/com.interceptor.host.json" ;;
       *Google/Chrome\ Canary*)           echo "    Chrome Canary:      $dir/com.interceptor.host.json" ;;
       *Google/Chrome\ Dev*)              echo "    Chrome Dev:         $dir/com.interceptor.host.json" ;;
-      *Google/Chrome\ for\ Testing*)     echo "    Chrome for Testing: $dir/com.interceptor.host.json" ;;
+      *Google/ChromeForTesting*|*Google/Chrome\ for\ Testing*) echo "    Chrome for Testing: $dir/com.interceptor.host.json" ;;
       *Google/Chrome*|*google-chrome*)   echo "    Chrome:             $dir/com.interceptor.host.json" ;;
       *Brave-Browser*|*BraveSoftware*)   echo "    Brave:              $dir/com.interceptor.host.json" ;;
       *Microsoft\ Edge*)                 echo "    Edge:               $dir/com.interceptor.host.json" ;;
