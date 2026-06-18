@@ -44,13 +44,37 @@ export async function parseTabsCommand(filtered: string[]): Promise<Action | nul
           return { type: "window_close", windowId: parseInt(filtered[2]) }
         case "focus":
           return { type: "window_focus", windowId: parseInt(filtered[2]) }
-        case "resize":
-          return {
-            type: "window_resize",
-            windowId: filtered[2] ? parseInt(filtered[2]) : undefined,
-            width: parseInt(filtered[3]),
-            height: parseInt(filtered[4])
+        case "resize": {
+          // Back-compat: `window resize <id> <width> <height>` (positional).
+          // New: --left/--top/--width/--height/--state flags (all forwarded to
+          // chrome.windows.update via the extension's window_resize handler,
+          // which already honors them). Enables absolute positioning + tiling.
+          const flagNum = (f: string) => {
+            const i = filtered.indexOf(f)
+            return i >= 0 && filtered[i + 1] !== undefined ? parseInt(filtered[i + 1]) : undefined
           }
+          const flagStr = (f: string) => {
+            const i = filtered.indexOf(f)
+            return i >= 0 ? filtered[i + 1] : undefined
+          }
+          const posNum = (idx: number) =>
+            filtered[idx] && !filtered[idx].startsWith("--") ? parseInt(filtered[idx]) : undefined
+          const action: Action = {
+            type: "window_resize",
+            windowId: filtered[2] ? parseInt(filtered[2]) : undefined
+          }
+          const width = flagNum("--width") ?? posNum(3)
+          const height = flagNum("--height") ?? posNum(4)
+          const left = flagNum("--left")
+          const top = flagNum("--top")
+          const state = flagStr("--state")
+          if (width !== undefined && !Number.isNaN(width)) action.width = width
+          if (height !== undefined && !Number.isNaN(height)) action.height = height
+          if (left !== undefined && !Number.isNaN(left)) action.left = left
+          if (top !== undefined && !Number.isNaN(top)) action.top = top
+          if (state !== undefined) action.state = state
+          return action
+        }
         case "list":
         default:
           return { type: "window_list" }
