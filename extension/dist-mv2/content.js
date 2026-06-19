@@ -271,15 +271,22 @@ function buildA11yTree(root, depth, maxDepth, filter, includeStyle = false, form
   function walk(el, d) {
     if (d > maxDepth)
       return;
-    if (!isVisible(el) && el.tagName !== "BODY")
-      return;
+    const style = el.tagName === "BODY" ? null : getComputedStyle(el);
+    const selfVisible = el.tagName === "BODY" || isVisible(el, style);
+    if (!selfVisible) {
+      if (style.display === "none" || style.visibility === "hidden")
+        return;
+      const pos = style.position;
+      if (pos !== "fixed" && pos !== "absolute")
+        return;
+    }
     const role = getEffectiveRole(el);
     const tag = el.tagName.toLowerCase();
     const isLandmark = LANDMARK_ROLES.has(role) || LANDMARK_TAGS.has(el.tagName);
     const isHeading = /^h[1-6]$/.test(tag) || role === "heading";
     const isInteractiveEl = isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES);
     const prefix = compact ? ">".repeat(d) : "  ".repeat(d);
-    if (isLandmark && !isInteractiveEl) {
+    if (selfVisible && isLandmark && !isInteractiveEl) {
       const name = getAccessibleName(el);
       const hasName = !!name && name !== (el.textContent || "").trim().slice(0, 80);
       if (compact) {
@@ -289,7 +296,7 @@ function buildA11yTree(root, depth, maxDepth, filter, includeStyle = false, form
         lines.push(`${prefix}${role || tag}${nameStr}`);
       }
     }
-    if (isHeading && filter === "all") {
+    if (selfVisible && isHeading && filter === "all") {
       const name = getAccessibleName(el);
       if (compact) {
         lines.push(`${prefix}heading|${name}`);
@@ -297,7 +304,7 @@ function buildA11yTree(root, depth, maxDepth, filter, includeStyle = false, form
         lines.push(`${prefix}heading "${name}"`);
       }
     }
-    if (isInteractiveEl) {
+    if (selfVisible && isInteractiveEl) {
       const refId = getOrAssignRef(el);
       const name = getAccessibleName(el);
       const attrs = getRelevantAttrs(el);
@@ -318,12 +325,12 @@ function buildA11yTree(root, depth, maxDepth, filter, includeStyle = false, form
     if (shadow) {
       const shadowPrefix = compact ? ">".repeat(d + 1) : `${prefix}  `;
       lines.push(`${shadowPrefix}shadow-root`);
-      for (const child of shadow.children) {
+      for (const child of Array.from(shadow.children)) {
         walk(child, d + 2);
       }
     }
-    for (const child of el.children) {
-      walk(child, isLandmark ? d + 1 : d);
+    for (const child of Array.from(el.children)) {
+      walk(child, isLandmark && selfVisible ? d + 1 : d);
     }
   }
   walk(root, depth);
@@ -362,8 +369,7 @@ function walkWithShadow(root, callback) {
     node = walker.nextNode();
   }
 }
-function isVisible(el) {
-  const style = getComputedStyle(el);
+function isVisible(el, style = getComputedStyle(el)) {
   if (style.visibility === "hidden" || style.display === "none")
     return false;
   const pos = style.position;
@@ -639,6 +645,18 @@ function dispatchClickSequence(el, atX, atY) {
   const rect = el.getBoundingClientRect();
   const x = atX !== undefined ? rect.left + atX : rect.left + rect.width / 2;
   const y = atY !== undefined ? rect.top + atY : rect.top + rect.height / 2;
+  let acked = false;
+  const onAck = () => {
+    acked = true;
+  };
+  el.addEventListener("__interceptor_click_ack", onAck, true);
+  try {
+    el.dispatchEvent(new CustomEvent("__interceptor_click", { bubbles: true, detail: { x, y } }));
+  } finally {
+    el.removeEventListener("__interceptor_click_ack", onAck, true);
+  }
+  if (acked)
+    return;
   const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
   el.dispatchEvent(new PointerEvent("pointerover", opts));
   el.dispatchEvent(new MouseEvent("mouseover", opts));
@@ -4262,20 +4280,24 @@ async function handleDomScreenshot(action) {
 }
 
 // extension/src/content.ts
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type === "execute_action") {
-    handleAction(msg.action).then(sendResponse).catch((err) => sendResponse({ success: false, error: err.message }));
-    return true;
-  }
-  if (msg.type === "get_state") {
-    try {
-      sendResponse(getPageState(msg.full));
-    } catch (err) {
-      sendResponse({ success: false, error: err.message });
+var __interceptorContentGlobal = globalThis;
+var __interceptorContentAlreadyLoaded = __interceptorContentGlobal.__interceptorContentLoaded === true;
+__interceptorContentGlobal.__interceptorContentLoaded = true;
+if (!__interceptorContentAlreadyLoaded)
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === "execute_action") {
+      handleAction(msg.action).then(sendResponse).catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
     }
-    return true;
-  }
-});
+    if (msg.type === "get_state") {
+      try {
+        sendResponse(getPageState(msg.full));
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+  });
 async function handleAction(action) {
   const warnDirty = getDomDirty();
   clearStaleWarning();
@@ -4502,13 +4524,14 @@ async function executeAction(action) {
   }
 }
 var _swKeepaliveLeader = true;
-setInterval(() => {
-  if (!_swKeepaliveLeader)
-    return;
-  try {
-    chrome.runtime.sendMessage({ type: "sw_keepalive" }).then((resp) => {
-      if (resp && resp.leader === false)
-        _swKeepaliveLeader = false;
-    }).catch(() => {});
-  } catch {}
-}, 25000);
+if (!__interceptorContentAlreadyLoaded)
+  setInterval(() => {
+    if (!_swKeepaliveLeader)
+      return;
+    try {
+      chrome.runtime.sendMessage({ type: "sw_keepalive" }).then((resp) => {
+        if (resp && resp.leader === false)
+          _swKeepaliveLeader = false;
+      }).catch(() => {});
+    } catch {}
+  }, 25000);
