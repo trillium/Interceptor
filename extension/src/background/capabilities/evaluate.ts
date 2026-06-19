@@ -152,9 +152,17 @@ export async function handleEvaluateActions(
       isCspEvalError(userScriptAttempt.result?.error)
     ) {
       const fallback = await executeWithUserScripts(tabId, "USER_SCRIPT", code)
-      if (fallback.available) return fallback.result ?? { success: false, error: "no result" }
+      if (
+        fallback.available &&
+        (fallback.result?.success || !isCspEvalError(fallback.result?.error))
+      ) {
+        return fallback.result ?? { success: false, error: "no result" }
+      }
+      // userScripts could not beat the page's CSP / Trusted-Types either — fall
+      // through to the executeEval CSP-strip bypass + reload path below.
+    } else {
+      return userScriptAttempt.result ?? { success: false, error: "no result" }
     }
-    return userScriptAttempt.result ?? { success: false, error: "no result" }
   }
   const first = await executeEval(tabId, world as "MAIN" | "ISOLATED", code)
   if (first.success || world !== "MAIN") {
@@ -173,17 +181,15 @@ export async function handleEvaluateActions(
         }
       }
     }
-    return {
-      success: false,
-      error: isolated.error || first.error,
-      data: {
-        originalError: first.error,
-        trustedTypesFallbackAttempted: true
-      }
-    }
+    // ISOLATED also failed under Trusted Types (e.g. require-trusted-types-for
+    // 'script' blocks eval in every world). Fall through to the CSP-strip
+    // bypass + reload path below — buildCspBypassRule removes the entire CSP
+    // response header (including require-trusted-types-for), so a reloaded
+    // page accepts MAIN-world eval. (Previously this returned early, leaving
+    // strict-TT sites like NotebookLM permanently un-evaluable.)
   }
 
-  if (!isCspUnsafeEvalError(first.error)) {
+  if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
     return first
   }
 

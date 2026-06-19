@@ -2007,10 +2007,12 @@ async function handleEvaluateActions(action, tabId) {
   if (userScriptAttempt.available) {
     if (!userScriptAttempt.result?.success && world === "MAIN" && isCspEvalError(userScriptAttempt.result?.error)) {
       const fallback = await executeWithUserScripts(tabId, "USER_SCRIPT", code);
-      if (fallback.available)
+      if (fallback.available && (fallback.result?.success || !isCspEvalError(fallback.result?.error))) {
         return fallback.result ?? { success: false, error: "no result" };
+      }
+    } else {
+      return userScriptAttempt.result ?? { success: false, error: "no result" };
     }
-    return userScriptAttempt.result ?? { success: false, error: "no result" };
   }
   const first = await executeEval(tabId, world, code);
   if (first.success || world !== "MAIN") {
@@ -2028,16 +2030,8 @@ async function handleEvaluateActions(action, tabId) {
         }
       };
     }
-    return {
-      success: false,
-      error: isolated.error || first.error,
-      data: {
-        originalError: first.error,
-        trustedTypesFallbackAttempted: true
-      }
-    };
   }
-  if (!isCspUnsafeEvalError(first.error)) {
+  if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
     return first;
   }
   try {
