@@ -10,6 +10,7 @@ export const messageQueue: Array<{
 }> = []
 
 const EXT_REQUEST_TIMEOUT_MS = 180_000
+const EXT_LONG_REQUEST_TIMEOUT_MS = 600_000
 export const pendingRequests = new Map<string, {
   action: string
   tabId?: number
@@ -80,11 +81,14 @@ export async function handleDaemonMessage(msg: {
     return
   }
 
+  const requestTimeoutMs = msg.action.type === "binary_sink_save"
+    ? EXT_LONG_REQUEST_TIMEOUT_MS
+    : EXT_REQUEST_TIMEOUT_MS
   const requestTimer = setTimeout(() => {
     const req = pendingRequests.get(msg.id!)
     pendingRequests.delete(msg.id!)
     sendToHost({ id: msg.id, result: { success: false, error: "extension timeout" } }, req?.viaWs)
-  }, EXT_REQUEST_TIMEOUT_MS)
+  }, requestTimeoutMs)
 
   const startTime = Date.now()
   const shortId = msg.id.slice(0, 8)

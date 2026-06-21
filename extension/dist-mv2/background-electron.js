@@ -2074,30 +2074,13 @@ async function reloadTabForCspRetry(tabId) {
   await chrome.tabs.reload(tabId, { bypassCache: true });
   await waitForTabLoad(tabId, 15000);
 }
-async function handleEvaluateActions(action, tabId) {
-  if (action.type !== "evaluate") {
-    return { success: false, error: `unknown evaluate action: ${action.type}` };
-  }
-  const code = action.code;
-  const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
-  const initialUserScriptWorld = world === "MAIN" ? "MAIN" : "USER_SCRIPT";
-  const userScriptAttempt = await executeWithUserScripts(tabId, initialUserScriptWorld, code);
-  if (userScriptAttempt.available) {
-    if (!userScriptAttempt.result?.success && world === "MAIN" && isCspEvalError(userScriptAttempt.result?.error)) {
-      const fallback = await executeWithUserScripts(tabId, "USER_SCRIPT", code);
-      if (fallback.available && (fallback.result?.success || !isCspEvalError(fallback.result?.error))) {
-        return fallback.result ?? { success: false, error: "no result" };
-      }
-    } else {
-      return userScriptAttempt.result ?? { success: false, error: "no result" };
-    }
-  }
-  const first = await executeEval(tabId, world, code);
+async function runWithCspStripBypass(tabId, world, run) {
+  const first = await run(tabId, world);
   if (first.success || world !== "MAIN") {
     return first;
   }
   if (isTrustedTypesError(first.error) && !isCspUnsafeEvalError(first.error)) {
-    const isolated = await executeEval(tabId, "ISOLATED", code);
+    const isolated = await run(tabId, "ISOLATED");
     if (isolated.success) {
       return {
         ...isolated,
@@ -2122,7 +2105,7 @@ async function handleEvaluateActions(action, tabId) {
       data: { originalError: first.error, cspBypassAttempted: false }
     };
   }
-  const retried = await executeEval(tabId, "MAIN", code);
+  const retried = await run(tabId, "MAIN");
   if (retried.success) {
     return {
       ...retried,
@@ -2141,6 +2124,369 @@ async function handleEvaluateActions(action, tabId) {
       cspBypassApplied: true
     }
   };
+}
+async function handleEvaluateActions(action, tabId) {
+  if (action.type !== "evaluate") {
+    return { success: false, error: `unknown evaluate action: ${action.type}` };
+  }
+  const code = action.code;
+  const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
+  const initialUserScriptWorld = world === "MAIN" ? "MAIN" : "USER_SCRIPT";
+  const userScriptAttempt = await executeWithUserScripts(tabId, initialUserScriptWorld, code);
+  if (userScriptAttempt.available) {
+    if (!userScriptAttempt.result?.success && world === "MAIN" && isCspEvalError(userScriptAttempt.result?.error)) {
+      const fallback = await executeWithUserScripts(tabId, "USER_SCRIPT", code);
+      if (fallback.available && (fallback.result?.success || !isCspEvalError(fallback.result?.error))) {
+        return fallback.result ?? { success: false, error: "no result" };
+      }
+    } else {
+      return userScriptAttempt.result ?? { success: false, error: "no result" };
+    }
+  }
+  return runWithCspStripBypass(tabId, world, (t, w) => executeEval(t, w, code));
+}
+
+// extension/src/background/capabilities/binary-sink.ts
+var DEFAULT_CHUNK_SIZE = 1024 * 1024;
+async function executeNormalize(tabId, world, code) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world,
+    args: [code],
+    func: async (sourceCode) => {
+      async function normalize(value) {
+        if (value && typeof value.then === "function") {
+          value = await value;
+        }
+        if (value instanceof Blob) {
+          return {
+            url: URL.createObjectURL(value),
+            size: value.size,
+            mime: value.type || "application/octet-stream",
+            kind: value instanceof File ? "file" : "blob",
+            created: true
+          };
+        }
+        if (value instanceof ArrayBuffer) {
+          const blob = new Blob([value], { type: "application/octet-stream" });
+          return {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            mime: blob.type,
+            kind: "arraybuffer",
+            created: true
+          };
+        }
+        if (ArrayBuffer.isView(value)) {
+          const source = value;
+          const bytes = new Uint8Array(source.byteLength);
+          bytes.set(new Uint8Array(source.buffer, source.byteOffset, source.byteLength));
+          const blob = new Blob([bytes.buffer], { type: "application/octet-stream" });
+          return {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            mime: blob.type,
+            kind: "arraybuffer-view",
+            created: true
+          };
+        }
+        if (typeof value === "string") {
+          if (value.startsWith("blob:")) {
+            return {
+              url: value,
+              size: -1,
+              mime: "application/octet-stream",
+              kind: "blob-url",
+              created: false
+            };
+          }
+          const blob = new Blob([value], { type: "text/plain;charset=utf-8" });
+          return {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            mime: blob.type,
+            kind: "text",
+            created: true
+          };
+        }
+        if (value && typeof value === "object") {
+          const record = value;
+          const candidate = record.url ?? record.blobUrl ?? record.href;
+          if (typeof candidate === "string" && candidate.startsWith("blob:")) {
+            return {
+              url: candidate,
+              size: typeof record.size === "number" ? record.size : -1,
+              mime: typeof record.type === "string" ? record.type : "application/octet-stream",
+              kind: "blob-url-object",
+              created: false
+            };
+          }
+        }
+        throw new Error("expression must return Blob, File, ArrayBuffer, typed array, string, or blob: URL");
+      }
+      try {
+        const w = window;
+        let evalSource = sourceCode;
+        if (w.trustedTypes) {
+          if (!w.__interceptor_sink_tt_policy) {
+            w.__interceptor_sink_tt_policy = w.trustedTypes.createPolicy("interceptor-binary-sink", {
+              createScript: (s) => s
+            });
+          }
+          evalSource = w.__interceptor_sink_tt_policy.createScript(sourceCode);
+        }
+        const value = (0, eval)(evalSource);
+        return { success: true, data: await normalize(value) };
+      } catch (err) {
+        return { success: false, error: err.message || String(err) };
+      }
+    }
+  });
+  return results[0]?.result ?? { success: false, error: "no result" };
+}
+async function prepareByteSource(tabId, code, world) {
+  const evalResult = await runWithCspStripBypass(tabId, world, (t, w) => executeNormalize(t, w, code));
+  if (!evalResult.success)
+    return evalResult;
+  let descriptor = evalResult.data;
+  if (descriptor && typeof descriptor === "object" && !("url" in descriptor) && "value" in descriptor) {
+    descriptor = descriptor.value;
+  }
+  if (!descriptor || typeof descriptor !== "object" || typeof descriptor.url !== "string") {
+    return { success: false, error: "byte source normalization returned no blob URL" };
+  }
+  return { success: true, data: descriptor };
+}
+async function cleanupByteSource(tabId, source, world) {
+  if (!source.created)
+    return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world,
+      args: [source.url],
+      func: (url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {}
+      }
+    });
+  } catch {}
+}
+async function stageByteSource(tabId, source) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    args: [source.url],
+    func: async (url) => {
+      const response = await fetch(url);
+      if (!response.ok && !url.startsWith("blob:")) {
+        throw new Error(`source fetch failed: ${response.status} ${response.statusText}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const key = "__interceptor_binary_sink_" + crypto.randomUUID().replace(/-/g, "");
+      globalThis[key] = bytes;
+      return { key, bytes: bytes.byteLength };
+    }
+  });
+  const result = results[0]?.result;
+  if (!result?.key || typeof result.bytes !== "number") {
+    throw new Error("failed to stage byte source");
+  }
+  return result;
+}
+async function cleanupStagedByteSource(tabId, staged) {
+  if (!staged)
+    return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      args: [staged.key],
+      func: (key) => {
+        try {
+          delete globalThis[key];
+        } catch {}
+      }
+    });
+  } catch {}
+}
+async function readStagedChunk(tabId, key, offset, length) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    args: [key, offset, length],
+    func: (sourceKey, start, count) => {
+      const bytes2 = globalThis[sourceKey];
+      if (!bytes2)
+        throw new Error("staged bytes not found");
+      const end = Math.min(start + count, bytes2.byteLength);
+      const slice = bytes2.subarray(start, end);
+      let binary2 = "";
+      const block = 32768;
+      for (let i = 0;i < slice.byteLength; i += block) {
+        binary2 += String.fromCharCode(...slice.subarray(i, Math.min(i + block, slice.byteLength)));
+      }
+      return btoa(binary2);
+    }
+  });
+  const b64 = results[0]?.result;
+  if (typeof b64 !== "string")
+    throw new Error("failed to read staged chunk");
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0;i < binary.length; i++)
+    bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function connectSinkSocket() {
+  const WS_URL = "ws://localhost:19222";
+  const MAGIC = new Uint8Array([73, 66, 83, 49]);
+  const encoder = new TextEncoder;
+  const sinkId = crypto.randomUUID();
+  const pending = new Map;
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(WS_URL);
+    ws.binaryType = "arraybuffer";
+    const timer = setTimeout(() => reject(new Error("binary sink websocket open timeout")), 1e4);
+    ws.onopen = () => {
+      clearTimeout(timer);
+      const request = (payload) => {
+        const id = crypto.randomUUID();
+        payload.id = id;
+        return new Promise((reqResolve, reqReject) => {
+          pending.set(id, { resolve: reqResolve, reject: reqReject });
+          ws.send(JSON.stringify(payload));
+        });
+      };
+      const waitForBackpressure = async () => {
+        while (ws.bufferedAmount > 16 * 1024 * 1024)
+          await wait(5);
+      };
+      const sendChunk = async (seq, bytes) => {
+        const header = encoder.encode(JSON.stringify({ sinkId, seq }));
+        const frame = new Uint8Array(8 + header.byteLength + bytes.byteLength);
+        frame.set(MAGIC, 0);
+        new DataView(frame.buffer).setUint32(4, header.byteLength, true);
+        frame.set(header, 8);
+        frame.set(bytes, 8 + header.byteLength);
+        ws.send(frame);
+        await waitForBackpressure();
+      };
+      resolve({
+        ws,
+        sinkId,
+        request,
+        sendChunk,
+        close: () => ws.close()
+      });
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error("binary sink websocket failed"));
+    };
+    ws.onmessage = (event) => {
+      if (typeof event.data !== "string")
+        return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!message.id || !pending.has(message.id))
+        return;
+      const callbacks = pending.get(message.id);
+      pending.delete(message.id);
+      callbacks.resolve(message);
+    };
+    ws.onclose = () => {
+      for (const callbacks of pending.values()) {
+        callbacks.reject(new Error("binary sink websocket closed"));
+      }
+      pending.clear();
+    };
+  });
+}
+async function streamByteSource(tabId, source, out, chunkSize) {
+  let staged = null;
+  let socket = null;
+  let seq = 0;
+  let streamed = 0;
+  try {
+    staged = await stageByteSource(tabId, source);
+    socket = await connectSinkSocket();
+    const open = await socket.request({
+      type: "binary_sink_open",
+      sinkId: socket.sinkId,
+      path: out,
+      expectedBytes: staged.bytes,
+      mime: source.mime,
+      sourceUrl: source.url
+    });
+    if (!open.result?.success)
+      throw new Error(open.result?.error || "binary sink open failed");
+    for (let offset = 0;offset < staged.bytes; offset += chunkSize) {
+      const bytes = await readStagedChunk(tabId, staged.key, offset, chunkSize);
+      if (bytes.byteLength === 0)
+        continue;
+      await socket.sendChunk(seq++, bytes);
+      streamed += bytes.byteLength;
+    }
+    while (socket.ws.bufferedAmount > 0)
+      await wait(5);
+    const close = await socket.request({ type: "binary_sink_close", sinkId: socket.sinkId });
+    if (!close.result?.success)
+      throw new Error(close.result?.error || "binary sink close failed");
+    return {
+      success: true,
+      data: {
+        ...close.result.data || {},
+        sourceKind: source.kind,
+        sourceMime: source.mime,
+        sourceBytes: source.size,
+        stagedBytes: staged.bytes,
+        streamedBytes: streamed,
+        chunks: seq
+      }
+    };
+  } catch (err) {
+    if (socket) {
+      try {
+        await socket.request({ type: "binary_sink_abort", sinkId: socket.sinkId, reason: err.message || String(err) });
+      } catch {}
+    }
+    return { success: false, error: err.message || String(err) };
+  } finally {
+    if (socket)
+      socket.close();
+    await cleanupStagedByteSource(tabId, staged);
+  }
+}
+async function handleBinarySinkActions(action, tabId) {
+  if (action.type !== "binary_sink_save") {
+    return { success: false, error: `unknown binary-sink action: ${action.type}` };
+  }
+  const code = action.code;
+  const out = action.out;
+  const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
+  const chunkSize = typeof action.chunkSize === "number" && action.chunkSize > 0 ? Math.floor(action.chunkSize) : DEFAULT_CHUNK_SIZE;
+  if (!out)
+    return { success: false, error: "missing output path" };
+  if (!code)
+    return { success: false, error: "missing expression" };
+  const prepared = await prepareByteSource(tabId, code, world);
+  if (!prepared.success)
+    return prepared;
+  const source = prepared.data;
+  try {
+    return await streamByteSource(tabId, source, out, chunkSize);
+  } finally {
+    await cleanupByteSource(tabId, source, world);
+  }
 }
 
 // extension/src/background/capabilities/style.ts
@@ -3446,6 +3792,7 @@ var NOTIFICATION_ACTIONS = new Set(["notification_create", "notification_clear"]
 var BROWSING_DATA_ACTIONS = new Set(["browsing_data_remove"]);
 var HEADER_ACTIONS = new Set(["headers_modify"]);
 var EVALUATE_ACTIONS = new Set(["evaluate"]);
+var BINARY_SINK_ACTIONS = new Set(["binary_sink_save"]);
 var STYLE_ACTIONS = new Set(["style_inject", "style_remove"]);
 var FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"]);
 var META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree"]);
@@ -3520,6 +3867,8 @@ async function routeAction(action, tabId) {
     return handleHeaderActions(action, tabId);
   if (EVALUATE_ACTIONS.has(action.type))
     return handleEvaluateActions(action, tabId);
+  if (BINARY_SINK_ACTIONS.has(action.type))
+    return handleBinarySinkActions(action, tabId);
   if (STYLE_ACTIONS.has(action.type))
     return handleStyleActions(action, tabId);
   if (FRAME_ACTIONS.has(action.type))
@@ -3587,6 +3936,7 @@ async function routeAction(action, tabId) {
 var MESSAGE_QUEUE_CAP = 50;
 var messageQueue = [];
 var EXT_REQUEST_TIMEOUT_MS = 180000;
+var EXT_LONG_REQUEST_TIMEOUT_MS = 600000;
 var pendingRequests = new Map;
 async function getActiveTabId() {
   const storage = chrome.storage;
@@ -3657,11 +4007,12 @@ async function handleDaemonMessage(msg) {
     sendToHost({ id: msg.id, result: { success: false, error: "duplicate request ID" } }, respondViaWsEarly);
     return;
   }
+  const requestTimeoutMs = msg.action.type === "binary_sink_save" ? EXT_LONG_REQUEST_TIMEOUT_MS : EXT_REQUEST_TIMEOUT_MS;
   const requestTimer = setTimeout(() => {
     const req = pendingRequests.get(msg.id);
     pendingRequests.delete(msg.id);
     sendToHost({ id: msg.id, result: { success: false, error: "extension timeout" } }, req?.viaWs);
-  }, EXT_REQUEST_TIMEOUT_MS);
+  }, requestTimeoutMs);
   const startTime = Date.now();
   const shortId = msg.id.slice(0, 8);
   const respondViaWs = !!msg._viaWs;

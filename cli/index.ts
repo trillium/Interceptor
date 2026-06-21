@@ -18,6 +18,7 @@ import { parseScreenshotCommand } from "./commands/screenshot"
 import { parseDataCommand } from "./commands/data"
 import { parseMetaCommand } from "./commands/meta"
 import { parseEvalCommand } from "./commands/eval"
+import { parseSaveCommand } from "./commands/save"
 import { parseBatchCommand } from "./commands/batch"
 import { parseMonitorCommand } from "./commands/monitor"
 import { parseSceneCommand } from "./commands/scene"
@@ -42,6 +43,7 @@ const SS_CMDS = new Set(["screenshot", "canvas", "capture", "ocr"])
 const DATA_CMDS = new Set(["cookies", "storage", "history", "bookmarks", "downloads", "clear", "clipboard"])
 const META_CMDS = new Set(["status", "reload", "meta", "links", "images", "forms", "info", "page_info", "query", "exists", "count", "table", "attr", "style", "events", "search", "notify", "sessions", "capabilities", "modals", "panels"])
 const EVAL_CMDS = new Set(["eval"])
+const SAVE_CMDS = new Set(["save"])
 const BATCH_CMDS = new Set(["batch", "raw"])
 const MONITOR_CMDS = new Set(["monitor"])
 const SCENE_CMDS = new Set(["scene"])
@@ -64,7 +66,7 @@ const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "in
 const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
-  ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
+  ...SAVE_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   "help", "contexts",
@@ -86,7 +88,13 @@ async function main() {
   // the documented 1MB native-messaging limit). The WebSocket transport does
   // not exhibit this issue, so we auto-route screenshot through it.
   const isScreenshotCmd = args[0] === "screenshot"
-  const useWs = args.includes("--ws") || (isScreenshotCmd && !args.includes("--no-ws"))
+  const isSaveCmd = args[0] === "save"
+  // `save` streams bytes over the WebSocket binary-framing protocol and cannot
+  // be delivered over the native-messaging / unix-socket path (that path mangles
+  // the action payload, e.g. "Unexpected token 'new'"). It therefore always
+  // routes over WS — a stray --no-ws would otherwise produce a confusing parse
+  // error. Screenshot still honors --no-ws as an escape hatch.
+  const useWs = args.includes("--ws") || isSaveCmd || (isScreenshotCmd && !args.includes("--no-ws"))
   const anyTab = args.includes("--any-tab")
   const globalTabId = parseTabFlag(args)
   const globalContextId = parseContextFlag(args)
@@ -229,6 +237,7 @@ async function main() {
   else if (DATA_CMDS.has(cmd))   action = parseDataCommand(filtered)
   else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
+  else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BATCH_CMDS.has(cmd))  action = parseBatchCommand(filtered)
   else if (MONITOR_CMDS.has(cmd)) action = await parseMonitorCommand(filtered, jsonMode)
   else if (SCENE_CMDS.has(cmd))   action = await parseSceneCommand(filtered, jsonMode)

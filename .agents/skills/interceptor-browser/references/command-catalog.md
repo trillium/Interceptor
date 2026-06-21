@@ -101,6 +101,29 @@ interceptor net monitor off
 Use `net monitor on --reload` when the WebSocket or BroadcastChannel is created
 during page startup. For mechanics and limits, see `page-communication-capture.md`.
 
+## Byte Export
+
+Save page-produced bytes without CDP, browser downloads, Save dialogs, or
+clipboard:
+
+```bash
+interceptor save --json --context <ctx> --tab <id> --out /abs/path/file.bin "window.someBlobOrUint8Array"
+interceptor save --json --context <ctx> --tab <id> --out /abs/path/file.bin "blob:https://example.com/..."
+interceptor save --json --context <ctx> --tab <id> --out /abs/path/file.txt "new Blob([text], {type:'text/plain'})"
+```
+
+Supported expression results: `Blob`, `File`, `ArrayBuffer`, typed arrays,
+`blob:` URL strings, and objects with `url`/`blobUrl`/`href`. Use an absolute
+output path (the sink writes anywhere the daemon's user can write).
+
+`save` must be the **first token** so the CLI auto-selects the WebSocket sink
+path. Other flags (`--json`, `--context`, `--tab`, `--isolated`, `--chunk-size`)
+may now appear in any position — the parser keeps them out of the evaluated
+expression. The response includes `sha256`, `bytes`, and `chunks`; the daemon
+discards the file and fails if the written byte count doesn't match the source,
+so a reported success is integrity-checked. Strict-CSP / Trusted-Types pages
+work too — `save` reuses the same CSP-strip + reload bypass as `eval`.
+
 ## Canvas
 
 ```bash

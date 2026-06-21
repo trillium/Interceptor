@@ -25,6 +25,7 @@ const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   // run loop never trips the old 15s timeout that left a split-brain envelope.
   macos_monitor: 60_000,
   screenshot: 45_000,
+  binary_sink_save: 600_000,
   screenshot_background: 45_000,
   canvas_read: 45_000,
   canvas_ocr: 60_000,

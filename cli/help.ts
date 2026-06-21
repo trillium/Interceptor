@@ -130,6 +130,7 @@ Capture:
   interceptor ocr --element N                OCR an element by ref
   interceptor eval <code>                    Run JS in isolated world
   interceptor eval <code> --main             Run JS in page context
+  interceptor save --out <path> <expr>       Save Blob/ArrayBuffer/blob: URL expression bytes without downloads or CDP
 
 Cookies:
   interceptor cookies <domain>               List cookies

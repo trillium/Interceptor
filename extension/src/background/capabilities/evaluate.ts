@@ -134,6 +134,89 @@ async function reloadTabForCspRetry(tabId: number): Promise<void> {
   await waitForTabLoad(tabId, 15_000)
 }
 
+/**
+ * Run a per-tab evaluation through the CSP / Trusted-Types escalation chain:
+ *   1. try the `run` callback in the requested world
+ *   2. on a Trusted-Types-only failure (MAIN), retry in ISOLATED
+ *   3. on any unsafe-eval CSP / TT failure (MAIN), strip the page's CSP response
+ *      header via a per-tab declarativeNetRequest rule + reload, then retry
+ *
+ * `run` performs the actual in-page work and returns an ActionResult — e.g.
+ * clone-eval for the `evaluate` capability, or blob-URL normalization for the
+ * binary sink. On the fallback / bypass paths the successful result's `data` is
+ * wrapped as `{ value, trustedTypesFallback | cspBypassApplied, originalError }`;
+ * callers that need the raw value should unwrap `data.value` when present.
+ *
+ * This is the shared bypass core (lifted out of handleEvaluateActions) so every
+ * capability that evals into a page inherits the same strict-CSP / Trusted-Types
+ * handling instead of reimplementing a weaker one.
+ */
+export async function runWithCspStripBypass(
+  tabId: number,
+  world: "MAIN" | "ISOLATED",
+  run: (tabId: number, world: "MAIN" | "ISOLATED") => Promise<ActionResult>
+): Promise<ActionResult> {
+  const first = await run(tabId, world)
+  if (first.success || world !== "MAIN") {
+    return first
+  }
+
+  if (isTrustedTypesError(first.error) && !isCspUnsafeEvalError(first.error)) {
+    const isolated = await run(tabId, "ISOLATED")
+    if (isolated.success) {
+      return {
+        ...isolated,
+        data: {
+          value: isolated.data,
+          trustedTypesFallback: true,
+          originalError: first.error
+        }
+      }
+    }
+    // ISOLATED also failed under Trusted Types (require-trusted-types-for
+    // 'script' blocks eval in every world). Fall through to the CSP-strip
+    // bypass + reload path below — buildCspBypassRule removes the entire CSP
+    // response header (including require-trusted-types-for), so a reloaded page
+    // accepts MAIN-world eval.
+  }
+
+  if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
+    return first
+  }
+
+  try {
+    await installCspBypassForTab(tabId)
+    await reloadTabForCspRetry(tabId)
+  } catch (err) {
+    return {
+      success: false,
+      error: `MAIN-world eval hit page CSP and automatic CSP bypass setup failed: ${(err as Error).message}`,
+      data: { originalError: first.error, cspBypassAttempted: false }
+    }
+  }
+
+  const retried = await run(tabId, "MAIN")
+  if (retried.success) {
+    return {
+      ...retried,
+      data: {
+        value: retried.data,
+        cspBypassApplied: true,
+        originalError: first.error
+      }
+    }
+  }
+
+  return {
+    success: false,
+    error: retried.error || first.error || "MAIN-world eval failed after CSP bypass retry",
+    data: {
+      originalError: first.error,
+      cspBypassApplied: true
+    }
+  }
+}
+
 export async function handleEvaluateActions(
   action: { type: string; [key: string]: unknown },
   tabId: number
@@ -164,64 +247,13 @@ export async function handleEvaluateActions(
       return userScriptAttempt.result ?? { success: false, error: "no result" }
     }
   }
-  const first = await executeEval(tabId, world as "MAIN" | "ISOLATED", code)
-  if (first.success || world !== "MAIN") {
-    return first
-  }
-
-  if (isTrustedTypesError(first.error) && !isCspUnsafeEvalError(first.error)) {
-    const isolated = await executeEval(tabId, "ISOLATED", code)
-    if (isolated.success) {
-      return {
-        ...isolated,
-        data: {
-          value: isolated.data,
-          trustedTypesFallback: true,
-          originalError: first.error
-        }
-      }
-    }
-    // ISOLATED also failed under Trusted Types (e.g. require-trusted-types-for
-    // 'script' blocks eval in every world). Fall through to the CSP-strip
-    // bypass + reload path below — buildCspBypassRule removes the entire CSP
-    // response header (including require-trusted-types-for), so a reloaded
-    // page accepts MAIN-world eval. (Previously this returned early, leaving
-    // strict-TT sites like NotebookLM permanently un-evaluable.)
-  }
-
-  if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
-    return first
-  }
-
-  try {
-    await installCspBypassForTab(tabId)
-    await reloadTabForCspRetry(tabId)
-  } catch (err) {
-    return {
-      success: false,
-      error: `MAIN-world eval hit page CSP and automatic CSP bypass setup failed: ${(err as Error).message}`,
-      data: { originalError: first.error, cspBypassAttempted: false }
-    }
-  }
-
-  const retried = await executeEval(tabId, "MAIN", code)
-  if (retried.success) {
-    return {
-      ...retried,
-      data: {
-        value: retried.data,
-        cspBypassApplied: true,
-        originalError: first.error
-      }
-    }
-  }
-
-  return {
-    success: false,
-    error: retried.error || first.error || "MAIN-world eval failed after CSP bypass retry",
-    data: {
-      originalError: first.error,
-      cspBypassApplied: true
-    }
-  }
+  // Trusted-Types / unsafe-eval CSP escalation now lives in the shared
+  // runWithCspStripBypass core (see above) so `evaluate` and the binary sink
+  // share one bypass implementation. The userScripts attempt above remains
+  // evaluate-specific.
+  return runWithCspStripBypass(
+    tabId,
+    world as "MAIN" | "ISOLATED",
+    (t, w) => executeEval(t, w, code)
+  )
 }
