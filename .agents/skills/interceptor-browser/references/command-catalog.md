@@ -243,6 +243,15 @@ interceptor capabilities                            # Available input layers
 interceptor reload                                  # After extension changes during dev
 ```
 
+## Branding (white-label)
+
+```bash
+interceptor brand tab-group --title "Acme"                # Rename the managed tab group at runtime
+interceptor brand tab-group --title "Acme" --color blue   # Title + color (grey|blue|red|yellow|green|pink|purple|cyan|orange)
+```
+
+Runtime-configurable — no rebuild, no options page. Resolved from `chrome.storage` (precedence `managed` > `local` > built-in default `interceptor`/`cyan`) and applied live to the tab-strip group. Settable here, from the toolbar popup, or via an enterprise managed policy.
+
 ## Eval (escape hatch)
 
 ```bash

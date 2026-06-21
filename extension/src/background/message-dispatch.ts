@@ -46,7 +46,7 @@ export function needsTab(type: string): boolean {
     "bookmark_create", "downloads_search", "browsing_data_remove",
     "session_list", "session_restore", "notification_create", "notification_clear",
     "search_query", "monitor_status", "monitor_start", "monitor_pause", "monitor_resume",
-    "monitor_stop"
+    "monitor_stop", "brand_set_tab_group"
   ])
   return !noTabActions.has(type)
 }

@@ -259,6 +259,10 @@ Meta:
   interceptor status --explain               Alias for --verbose with extra rationale per component
   interceptor help                           This help text
 
+Branding:
+  interceptor brand tab-group --title <label> [--color <color>]
+                                             White-label the Chrome tab-group label/color at runtime (no rebuild)
+
 macOS App Internals:
   interceptor macos cdp connect <port> [--host H] [--app NAME] [--url HINT]
                                              Attach to an Electron/Chromium app debug port

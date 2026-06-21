@@ -1,3 +1,5 @@
+import { getTabGroupTitle, getTabGroupColor, getCandidateTitles } from "./brand-tab-group"
+
 export let interceptorGroupId: number | null = null
 
 function hasTabGroupApi(): boolean {
@@ -14,9 +16,14 @@ export async function ensureInterceptorGroup(): Promise<number> {
       interceptorGroupId = null
     }
   }
-  const groups = await chrome.tabGroups.query({ title: "interceptor" })
-  if (groups.length > 0) {
-    interceptorGroupId = groups[0].id
+  // Re-discover by the CANDIDATE TITLE SET (resolved brand + previous + default "interceptor"),
+  // not a single hardcoded title, so a group created under the default or a prior brand is re-adopted
+  // rather than orphaned after a retitle + SW restart.
+  const candidates = await getCandidateTitles()
+  const groups = await chrome.tabGroups.query({})
+  const match = groups.find((g) => typeof g.title === "string" && candidates.includes(g.title))
+  if (match) {
+    interceptorGroupId = match.id
     return interceptorGroupId
   }
   return -1
@@ -27,7 +34,10 @@ export async function addTabToInterceptorGroup(tabId: number): Promise<number> {
   if (groupId === -1 && (!hasTabGroupApi() || typeof chrome.tabs.group !== "function")) return -1
   if (groupId === -1) {
     groupId = await chrome.tabs.group({ tabIds: tabId })
-    await chrome.tabGroups.update(groupId, { title: "interceptor", color: "cyan" })
+    await chrome.tabGroups.update(groupId, {
+      title: getTabGroupTitle(),
+      color: getTabGroupColor() as `${chrome.tabGroups.Color}`,
+    })
     interceptorGroupId = groupId
   } else {
     await chrome.tabs.group({ tabIds: tabId, groupId })

@@ -19,6 +19,7 @@ import { parseDataCommand } from "./commands/data"
 import { parseMetaCommand } from "./commands/meta"
 import { parseEvalCommand } from "./commands/eval"
 import { parseSaveCommand } from "./commands/save"
+import { parseBrandCommand } from "./commands/brand"
 import { parseBatchCommand } from "./commands/batch"
 import { parseMonitorCommand } from "./commands/monitor"
 import { parseSceneCommand } from "./commands/scene"
@@ -44,6 +45,7 @@ const DATA_CMDS = new Set(["cookies", "storage", "history", "bookmarks", "downlo
 const META_CMDS = new Set(["status", "reload", "meta", "links", "images", "forms", "info", "page_info", "query", "exists", "count", "table", "attr", "style", "events", "search", "notify", "sessions", "capabilities", "modals", "panels"])
 const EVAL_CMDS = new Set(["eval"])
 const SAVE_CMDS = new Set(["save"])
+const BRAND_CMDS = new Set(["brand"])
 const BATCH_CMDS = new Set(["batch", "raw"])
 const MONITOR_CMDS = new Set(["monitor"])
 const SCENE_CMDS = new Set(["scene"])
@@ -66,7 +68,7 @@ const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "in
 const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
-  ...SAVE_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
+  ...SAVE_CMDS, ...BRAND_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   "help", "contexts",
@@ -238,6 +240,7 @@ async function main() {
   else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
+  else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)
   else if (BATCH_CMDS.has(cmd))  action = parseBatchCommand(filtered)
   else if (MONITOR_CMDS.has(cmd)) action = await parseMonitorCommand(filtered, jsonMode)
   else if (SCENE_CMDS.has(cmd))   action = await parseSceneCommand(filtered, jsonMode)

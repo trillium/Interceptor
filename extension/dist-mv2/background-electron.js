@@ -1,3 +1,45 @@
+// extension/src/background/brand-tab-group.ts
+var VALID_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"];
+var DEFAULT_TAB_GROUP_TITLE = "interceptor";
+var DEFAULT_TAB_GROUP_COLOR = "cyan";
+var SESSION_PREV_TITLE_KEY = "brandTabGroupPrevTitle";
+var cachedTitle = DEFAULT_TAB_GROUP_TITLE;
+var cachedColor = DEFAULT_TAB_GROUP_COLOR;
+function normalizeColor(color) {
+  return typeof color === "string" && VALID_COLORS.includes(color) ? color : DEFAULT_TAB_GROUP_COLOR;
+}
+function getTabGroupTitle() {
+  return cachedTitle;
+}
+function getTabGroupColor() {
+  return normalizeColor(cachedColor);
+}
+function sessionArea() {
+  const storage = chrome.storage;
+  return storage.session;
+}
+async function getPreviousTitle() {
+  try {
+    const area = sessionArea();
+    if (!area)
+      return;
+    const stored = await area.get(SESSION_PREV_TITLE_KEY);
+    const v = stored?.[SESSION_PREV_TITLE_KEY];
+    return typeof v === "string" ? v : undefined;
+  } catch {
+    return;
+  }
+}
+async function getCandidateTitles() {
+  const titles = new Set;
+  titles.add(cachedTitle);
+  const prev = await getPreviousTitle();
+  if (prev)
+    titles.add(prev);
+  titles.add(DEFAULT_TAB_GROUP_TITLE);
+  return [...titles];
+}
+
 // extension/src/background/tab-group.ts
 var interceptorGroupId = null;
 function hasTabGroupApi() {
@@ -14,9 +56,11 @@ async function ensureInterceptorGroup() {
       interceptorGroupId = null;
     }
   }
-  const groups = await chrome.tabGroups.query({ title: "interceptor" });
-  if (groups.length > 0) {
-    interceptorGroupId = groups[0].id;
+  const candidates = await getCandidateTitles();
+  const groups = await chrome.tabGroups.query({});
+  const match = groups.find((g) => typeof g.title === "string" && candidates.includes(g.title));
+  if (match) {
+    interceptorGroupId = match.id;
     return interceptorGroupId;
   }
   return -1;
@@ -27,7 +71,10 @@ async function addTabToInterceptorGroup(tabId) {
     return -1;
   if (groupId === -1) {
     groupId = await chrome.tabs.group({ tabIds: tabId });
-    await chrome.tabGroups.update(groupId, { title: "interceptor", color: "cyan" });
+    await chrome.tabGroups.update(groupId, {
+      title: getTabGroupTitle(),
+      color: getTabGroupColor()
+    });
     interceptorGroupId = groupId;
   } else {
     await chrome.tabs.group({ tabIds: tabId, groupId });
@@ -2732,6 +2779,14 @@ async function handleMetaActions(action, tabId) {
 `);
       return { success: true, data: formatted || "empty tree" };
     }
+    case "brand_set_tab_group": {
+      const title = typeof action.title === "string" ? action.title.trim() : "";
+      if (!title)
+        return { success: false, error: "brand_set_tab_group requires a non-empty title" };
+      const color = typeof action.color === "string" ? action.color : "cyan";
+      await chrome.storage.local.set({ brandTabGroup: { title, color } });
+      return { success: true, data: { brandTabGroup: { title, color } } };
+    }
   }
   return { success: false, error: `unknown meta action: ${action.type}` };
 }
@@ -3795,7 +3850,7 @@ var EVALUATE_ACTIONS = new Set(["evaluate"]);
 var BINARY_SINK_ACTIONS = new Set(["binary_sink_save"]);
 var STYLE_ACTIONS = new Set(["style_inject", "style_remove"]);
 var FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"]);
-var META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree"]);
+var META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group"]);
 var PASSIVE_NET_ACTIONS = new Set([
   "net_log",
   "net_clear",
@@ -3980,7 +4035,8 @@ function needsTab(type) {
     "monitor_start",
     "monitor_pause",
     "monitor_resume",
-    "monitor_stop"
+    "monitor_stop",
+    "brand_set_tab_group"
   ]);
   return !noTabActions.has(type);
 }
