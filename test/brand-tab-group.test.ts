@@ -13,7 +13,7 @@ import {
 
 describe("brand-tab-group: color validation", () => {
   test("every valid Chrome tabGroups color passes through", () => {
-    for (const c of ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]) {
+    for (const c of ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"] as const) {
       expect(normalizeColor(c)).toBe(c)
     }
   })
