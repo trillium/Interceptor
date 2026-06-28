@@ -180,6 +180,10 @@ interceptor tab switch <tab-id>
 interceptor tab close <tab-id>
 interceptor window list
 interceptor window new
+interceptor window focus <window-id>                      # Explicit focus move
+interceptor window resize <window-id> <width> <height>
+interceptor window resize <window-id> --left 0 --top 0 --width 960 --height 1080
+interceptor window resize --state maximized               # Don't combine maximized/fullscreen/minimized with geometry
 ```
 
 Use `--tab <id>` for a specific tab; `--any-tab` only when explicitly authorized.

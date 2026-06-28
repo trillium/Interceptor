@@ -9,6 +9,118 @@ import { writeFileSync } from "node:fs"
 
 type Action = { type: string; [key: string]: unknown }
 
+const WINDOW_RESIZE_NUMBER_FLAGS = new Set(["--left", "--top", "--width", "--height"])
+const WINDOW_RESIZE_FLAGS = new Set([...WINDOW_RESIZE_NUMBER_FLAGS, "--state"])
+const WINDOW_GEOMETRY_KEYS = ["left", "top", "width", "height"] as const
+const WINDOW_STATES = new Set(["normal", "minimized", "maximized", "fullscreen", "locked-fullscreen"])
+const WINDOW_STATES_WITHOUT_GEOMETRY = new Set(["minimized", "maximized", "fullscreen", "locked-fullscreen"])
+
+function parseIntegerArg(label: string, raw: string | undefined): number {
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new Error(`${label} requires a value`)
+  }
+  if (!/^-?\d+$/.test(raw)) {
+    throw new Error(`${label} must be an integer`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${label} is outside the safe integer range`)
+  }
+  return value
+}
+
+function parsePositiveIntegerArg(label: string, raw: string | undefined): number {
+  const value = parseIntegerArg(label, raw)
+  if (value <= 0) {
+    throw new Error(`${label} must be a positive integer`)
+  }
+  return value
+}
+
+function windowResizeKeyForFlag(flag: string): "left" | "top" | "width" | "height" {
+  return flag.slice(2) as "left" | "top" | "width" | "height"
+}
+
+function die(message: string): never {
+  console.error(`error: ${message}`)
+  process.exit(1)
+}
+
+function parseWindowIdForCli(raw: string | undefined): number {
+  try {
+    return parsePositiveIntegerArg("window id", raw)
+  } catch (err) {
+    die((err as Error).message)
+  }
+}
+
+export function buildWindowResizeAction(args: string[]): Action {
+  const action: Action = { type: "window_resize" }
+  let i = 0
+  const positional: string[] = []
+
+  if (args[0] && !args[0].startsWith("--")) {
+    action.windowId = parsePositiveIntegerArg("window id", args[0])
+    i = 1
+  }
+
+  for (; i < args.length; i++) {
+    const token = args[i]
+    if (token.startsWith("--")) {
+      if (!WINDOW_RESIZE_FLAGS.has(token)) {
+        throw new Error(`unknown window resize flag: ${token}`)
+      }
+      if (token === "--state") {
+        const state = args[i + 1]
+        if (!state || state.startsWith("--")) {
+          throw new Error("--state requires a value")
+        }
+        if (!WINDOW_STATES.has(state)) {
+          throw new Error(`invalid window state: ${state}`)
+        }
+        action.state = state
+        i++
+        continue
+      }
+
+      const key = windowResizeKeyForFlag(token)
+      const label = token
+      action[key] = key === "width" || key === "height"
+        ? parsePositiveIntegerArg(label, args[i + 1])
+        : parseIntegerArg(label, args[i + 1])
+      i++
+      continue
+    }
+
+    positional.push(token)
+  }
+
+  if (positional.length > 0) {
+    if (action.windowId === undefined) {
+      throw new Error("positional width/height require an explicit window id")
+    }
+    if (positional.length !== 2) {
+      throw new Error("usage: interceptor window resize <window-id> <width> <height>")
+    }
+    if (action.width !== undefined || action.height !== undefined) {
+      throw new Error("do not combine positional width/height with --width or --height")
+    }
+    action.width = parsePositiveIntegerArg("width", positional[0])
+    action.height = parsePositiveIntegerArg("height", positional[1])
+  }
+
+  const state = action.state as string | undefined
+  const hasGeometry = WINDOW_GEOMETRY_KEYS.some((key) => action[key] !== undefined)
+  if (state && WINDOW_STATES_WITHOUT_GEOMETRY.has(state) && hasGeometry) {
+    throw new Error(`${state} cannot be combined with left, top, width, or height`)
+  }
+  if (!state && !hasGeometry) {
+    throw new Error("window resize requires --state or at least one geometry field")
+  }
+
+  return action
+}
+
 export async function parseTabsCommand(filtered: string[]): Promise<Action | null> {
   const cmd = filtered[0]
 
@@ -41,39 +153,15 @@ export async function parseTabsCommand(filtered: string[]): Promise<Action | nul
         case "new":
           return { type: "window_create", url: filtered[2], incognito: filtered.includes("--incognito") }
         case "close":
-          return { type: "window_close", windowId: parseInt(filtered[2]) }
+          return { type: "window_close", windowId: parseWindowIdForCli(filtered[2]) }
         case "focus":
-          return { type: "window_focus", windowId: parseInt(filtered[2]) }
+          return { type: "window_focus", windowId: parseWindowIdForCli(filtered[2]) }
         case "resize": {
-          // Back-compat: `window resize <id> <width> <height>` (positional).
-          // New: --left/--top/--width/--height/--state flags (all forwarded to
-          // chrome.windows.update via the extension's window_resize handler,
-          // which already honors them). Enables absolute positioning + tiling.
-          const flagNum = (f: string) => {
-            const i = filtered.indexOf(f)
-            return i >= 0 && filtered[i + 1] !== undefined ? parseInt(filtered[i + 1]) : undefined
+          try {
+            return buildWindowResizeAction(filtered.slice(2))
+          } catch (err) {
+            die((err as Error).message)
           }
-          const flagStr = (f: string) => {
-            const i = filtered.indexOf(f)
-            return i >= 0 ? filtered[i + 1] : undefined
-          }
-          const posNum = (idx: number) =>
-            filtered[idx] && !filtered[idx].startsWith("--") ? parseInt(filtered[idx]) : undefined
-          const action: Action = {
-            type: "window_resize",
-            windowId: filtered[2] ? parseInt(filtered[2]) : undefined
-          }
-          const width = flagNum("--width") ?? posNum(3)
-          const height = flagNum("--height") ?? posNum(4)
-          const left = flagNum("--left")
-          const top = flagNum("--top")
-          const state = flagStr("--state")
-          if (width !== undefined && !Number.isNaN(width)) action.width = width
-          if (height !== undefined && !Number.isNaN(height)) action.height = height
-          if (left !== undefined && !Number.isNaN(left)) action.left = left
-          if (top !== undefined && !Number.isNaN(top)) action.top = top
-          if (state !== undefined) action.state = state
-          return action
         }
         case "list":
         default:

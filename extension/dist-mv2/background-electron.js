@@ -1655,71 +1655,118 @@ async function handleTabActions(action, tabId) {
 }
 
 // extension/src/background/capabilities/windows.ts
-async function handleWindowActions(action, _tabId) {
-  switch (action.type) {
-    case "window_create": {
-      const win = await chrome.windows.create({
-        url: action.url,
-        type: action.windowType || "normal",
-        width: action.width,
-        height: action.height,
-        left: action.left,
-        top: action.top,
-        incognito: !!action.incognito,
-        focused: action.focused !== false
-      });
-      if (!win)
-        return { success: false, error: "window creation returned no window" };
-      const firstTab = win.tabs?.[0];
-      let groupId;
-      if (firstTab?.id && !action.incognito) {
-        groupId = await addTabToInterceptorGroup(firstTab.id);
-      }
-      return {
-        success: true,
-        data: { windowId: win.id, groupId, tabs: win.tabs?.map((t) => ({ id: t.id, url: t.url })) }
-      };
-    }
-    case "window_close":
-      await chrome.windows.remove(action.windowId);
-      return { success: true };
-    case "window_focus":
-      await chrome.windows.update(action.windowId, { focused: true });
-      return { success: true };
-    case "window_resize": {
-      const targetId = action.windowId || (await chrome.windows.getCurrent()).id;
-      if (targetId === undefined)
-        return { success: false, error: "no target window id available" };
-      await chrome.windows.update(targetId, {
-        width: action.width,
-        height: action.height,
-        left: action.left,
-        top: action.top,
-        state: action.state
-      });
-      return { success: true };
-    }
-    case "window_list":
-    case "window_get_all": {
-      const windows = await chrome.windows.getAll({ populate: true });
-      return {
-        success: true,
-        data: windows.map((w) => ({
-          id: w.id,
-          type: w.type,
-          state: w.state,
-          focused: w.focused,
-          width: w.width,
-          height: w.height,
-          left: w.left,
-          top: w.top,
-          incognito: w.incognito,
-          tabs: w.tabs?.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active }))
-        }))
-      };
-    }
+var WINDOW_OP_TIMEOUT_MS = 8000;
+
+class WindowOperationTimeoutError extends Error {
+  operation;
+  timeoutMs;
+  constructor(operation, timeoutMs) {
+    super(`${operation} timed out after ${timeoutMs}ms (service worker may be wedged)`);
+    this.operation = operation;
+    this.timeoutMs = timeoutMs;
+    this.name = "WindowOperationTimeoutError";
   }
-  return { success: false, error: `unknown window action: ${action.type}` };
+}
+function withWindowTimeout(op, p, ms = WINDOW_OP_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new WindowOperationTimeoutError(op, ms)), ms);
+    p.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+function windowIdFromAction(action) {
+  return typeof action.windowId === "number" && Number.isFinite(action.windowId) ? action.windowId : undefined;
+}
+function windowUpdateInfoFromAction(action) {
+  const info = {};
+  if (typeof action.width === "number")
+    info.width = action.width;
+  if (typeof action.height === "number")
+    info.height = action.height;
+  if (typeof action.left === "number")
+    info.left = action.left;
+  if (typeof action.top === "number")
+    info.top = action.top;
+  if (typeof action.state === "string")
+    info.state = action.state;
+  return info;
+}
+async function handleWindowActions(action, _tabId) {
+  try {
+    switch (action.type) {
+      case "window_create": {
+        const win = await withWindowTimeout("window_create", chrome.windows.create({
+          url: action.url,
+          type: action.windowType || "normal",
+          width: action.width,
+          height: action.height,
+          left: action.left,
+          top: action.top,
+          incognito: !!action.incognito,
+          focused: action.focused !== false
+        }));
+        if (!win)
+          return { success: false, error: "window creation returned no window" };
+        const firstTab = win.tabs?.[0];
+        let groupId;
+        if (firstTab?.id && !action.incognito) {
+          groupId = await addTabToInterceptorGroup(firstTab.id);
+        }
+        return {
+          success: true,
+          data: { windowId: win.id, groupId, tabs: win.tabs?.map((t) => ({ id: t.id, url: t.url })) }
+        };
+      }
+      case "window_close": {
+        const windowId = windowIdFromAction(action);
+        if (windowId === undefined)
+          return { success: false, error: "window_close requires a window id" };
+        await withWindowTimeout("window_close", chrome.windows.remove(windowId));
+        return { success: true };
+      }
+      case "window_focus": {
+        const windowId = windowIdFromAction(action);
+        if (windowId === undefined)
+          return { success: false, error: "window_focus requires a window id" };
+        await withWindowTimeout("window_focus", chrome.windows.update(windowId, { focused: true }));
+        return { success: true };
+      }
+      case "window_resize": {
+        const targetId = windowIdFromAction(action) ?? (await withWindowTimeout("window_getCurrent", chrome.windows.getCurrent())).id;
+        if (targetId === undefined)
+          return { success: false, error: "no target window id available" };
+        await withWindowTimeout("window_resize", chrome.windows.update(targetId, windowUpdateInfoFromAction(action)));
+        return { success: true };
+      }
+      case "window_list":
+      case "window_get_all": {
+        const windows = await withWindowTimeout("window_list", chrome.windows.getAll({ populate: true }));
+        return {
+          success: true,
+          data: windows.map((w) => ({
+            id: w.id,
+            type: w.type,
+            state: w.state,
+            focused: w.focused,
+            width: w.width,
+            height: w.height,
+            left: w.left,
+            top: w.top,
+            incognito: w.incognito,
+            tabs: w.tabs?.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active }))
+          }))
+        };
+      }
+    }
+    return { success: false, error: `unknown window action: ${action.type}` };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // extension/src/background/capabilities/navigation.ts
@@ -3987,6 +4034,41 @@ async function routeAction(action, tabId) {
   return contentResult;
 }
 
+// extension/src/background/no-tab-actions.ts
+var NO_TAB_ACTIONS = new Set([
+  "status",
+  "reload_extension",
+  "tab_create",
+  "tab_list",
+  "window_create",
+  "window_close",
+  "window_focus",
+  "window_resize",
+  "window_list",
+  "window_get_all",
+  "history_search",
+  "history_delete_all",
+  "bookmark_tree",
+  "bookmark_search",
+  "bookmark_create",
+  "downloads_search",
+  "browsing_data_remove",
+  "session_list",
+  "session_restore",
+  "notification_create",
+  "notification_clear",
+  "search_query",
+  "monitor_status",
+  "monitor_start",
+  "monitor_pause",
+  "monitor_resume",
+  "monitor_stop",
+  "brand_set_tab_group"
+]);
+function needsTab(type) {
+  return !NO_TAB_ACTIONS.has(type);
+}
+
 // extension/src/background/message-dispatch.ts
 var MESSAGE_QUEUE_CAP = 50;
 var messageQueue = [];
@@ -4009,36 +4091,6 @@ function drainMessageQueue() {
     const queued = messageQueue.shift();
     handleDaemonMessage(queued);
   }
-}
-function needsTab(type) {
-  const noTabActions = new Set([
-    "status",
-    "reload_extension",
-    "tab_create",
-    "tab_list",
-    "window_create",
-    "window_list",
-    "window_get_all",
-    "history_search",
-    "history_delete_all",
-    "bookmark_tree",
-    "bookmark_search",
-    "bookmark_create",
-    "downloads_search",
-    "browsing_data_remove",
-    "session_list",
-    "session_restore",
-    "notification_create",
-    "notification_clear",
-    "search_query",
-    "monitor_status",
-    "monitor_start",
-    "monitor_pause",
-    "monitor_resume",
-    "monitor_stop",
-    "brand_set_tab_group"
-  ]);
-  return !noTabActions.has(type);
 }
 async function handleDaemonMessage(msg) {
   if (!msg.action || !msg.id)

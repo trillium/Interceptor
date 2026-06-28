@@ -12,16 +12,47 @@ type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: 
 //      a timeout or a throw becomes an honest { success:false, error } the CLI can see.
 const WINDOW_OP_TIMEOUT_MS = 8000
 
-function withTimeout<T>(op: string, p: Promise<T>, ms = WINDOW_OP_TIMEOUT_MS): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`${op} timed out after ${ms}ms (service worker may be wedged)`)),
-        ms
-      )
-    ),
-  ])
+export class WindowOperationTimeoutError extends Error {
+  constructor(public readonly operation: string, public readonly timeoutMs: number) {
+    super(`${operation} timed out after ${timeoutMs}ms (service worker may be wedged)`)
+    this.name = "WindowOperationTimeoutError"
+  }
+}
+
+export function withWindowTimeout<T>(
+  op: string,
+  p: Promise<T>,
+  ms = WINDOW_OP_TIMEOUT_MS
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new WindowOperationTimeoutError(op, ms)), ms)
+    p.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+function windowIdFromAction(action: { [key: string]: unknown }): number | undefined {
+  return typeof action.windowId === "number" && Number.isFinite(action.windowId)
+    ? action.windowId
+    : undefined
+}
+
+function windowUpdateInfoFromAction(action: { [key: string]: unknown }): chrome.windows.UpdateInfo {
+  const info: chrome.windows.UpdateInfo = {}
+  if (typeof action.width === "number") info.width = action.width
+  if (typeof action.height === "number") info.height = action.height
+  if (typeof action.left === "number") info.left = action.left
+  if (typeof action.top === "number") info.top = action.top
+  if (typeof action.state === "string") info.state = action.state as chrome.windows.UpdateInfo["state"]
+  return info
 }
 
 export async function handleWindowActions(
@@ -31,7 +62,7 @@ export async function handleWindowActions(
   try {
     switch (action.type) {
       case "window_create": {
-        const win = await withTimeout(
+        const win = await withWindowTimeout(
           "window_create",
           chrome.windows.create({
             url: action.url as string | undefined,
@@ -56,38 +87,38 @@ export async function handleWindowActions(
         }
       }
 
-      case "window_close":
-        await withTimeout("window_close", chrome.windows.remove(action.windowId as number))
+      case "window_close": {
+        const windowId = windowIdFromAction(action)
+        if (windowId === undefined) return { success: false, error: "window_close requires a window id" }
+        await withWindowTimeout("window_close", chrome.windows.remove(windowId))
         return { success: true }
+      }
 
-      case "window_focus":
-        await withTimeout(
+      case "window_focus": {
+        const windowId = windowIdFromAction(action)
+        if (windowId === undefined) return { success: false, error: "window_focus requires a window id" }
+        await withWindowTimeout(
           "window_focus",
-          chrome.windows.update(action.windowId as number, { focused: true })
+          chrome.windows.update(windowId, { focused: true })
         )
         return { success: true }
+      }
 
       case "window_resize": {
         const targetId =
-          (action.windowId as number) ||
-          (await withTimeout("window_getCurrent", chrome.windows.getCurrent())).id
+          windowIdFromAction(action) ??
+          (await withWindowTimeout("window_getCurrent", chrome.windows.getCurrent())).id
         if (targetId === undefined) return { success: false, error: "no target window id available" }
-        await withTimeout(
+        await withWindowTimeout(
           "window_resize",
-          chrome.windows.update(targetId, {
-            width: action.width as number | undefined,
-            height: action.height as number | undefined,
-            left: action.left as number | undefined,
-            top: action.top as number | undefined,
-            state: action.state as chrome.windows.UpdateInfo["state"],
-          })
+          chrome.windows.update(targetId, windowUpdateInfoFromAction(action))
         )
         return { success: true }
       }
 
       case "window_list":
       case "window_get_all": {
-        const windows = await withTimeout("window_list", chrome.windows.getAll({ populate: true }))
+        const windows = await withWindowTimeout("window_list", chrome.windows.getAll({ populate: true }))
         return {
           success: true,
           data: windows.map(w => ({
