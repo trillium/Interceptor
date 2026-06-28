@@ -150,6 +150,15 @@ Tabs:
   interceptor tab new [url] --activate       Open new tab and foreground it (explicit opt-in)
   interceptor tab close [id]                 Close tab
   interceptor tab switch <id>                Switch to tab (explicit focus move)
+  interceptor window new [url]               Open a new browser window
+  interceptor window list                    List all browser windows
+  interceptor window close <id>              Close a browser window
+  interceptor window focus <id>              Focus a browser window (explicit focus move)
+  interceptor window resize <id> <w> <h>     Resize a browser window
+  interceptor window resize <id> --left N --top N --width N --height N
+                                             Move and resize a browser window
+  interceptor window resize --state maximized
+                                             Change current window state; don't combine maximized/fullscreen/minimized with geometry
 
 Capture:
   interceptor screenshot                     Full-page DOM-render screenshot (default — works without focus)

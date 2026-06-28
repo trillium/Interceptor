@@ -1,6 +1,7 @@
 import { sendToHost, activeTransport, connectToHost, connectWsChannel } from "./transport"
 import { isTabInInterceptorGroup, interceptorGroupId, ensureInterceptorGroup, SENSITIVE_ACTIONS, verifyTabUrl } from "./tab-group"
 import { routeAction } from "./router"
+import { needsTab } from "./no-tab-actions"
 
 export const MESSAGE_QUEUE_CAP = 50
 export const messageQueue: Array<{
@@ -37,18 +38,6 @@ export function drainMessageQueue(): void {
     const queued = messageQueue.shift()!
     handleDaemonMessage(queued)
   }
-}
-
-export function needsTab(type: string): boolean {
-  const noTabActions = new Set([
-    "status", "reload_extension", "tab_create", "tab_list", "window_create", "window_list", "window_get_all",
-    "history_search", "history_delete_all", "bookmark_tree", "bookmark_search",
-    "bookmark_create", "downloads_search", "browsing_data_remove",
-    "session_list", "session_restore", "notification_create", "notification_clear",
-    "search_query", "monitor_status", "monitor_start", "monitor_pause", "monitor_resume",
-    "monitor_stop", "brand_set_tab_group"
-  ])
-  return !noTabActions.has(type)
 }
 
 export async function handleDaemonMessage(msg: {

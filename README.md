@@ -416,6 +416,12 @@ interceptor tab close                        # Close current tab
 interceptor tab close 12345                  # Close specific tab
 interceptor window new "https://example.com" # New window
 interceptor window list                      # List all windows
+interceptor window focus 123                 # Focus a window (explicit focus move)
+interceptor window resize 123 1200 800       # Resize by ID
+interceptor window resize 123 --left 0 --top 0 --width 960 --height 1080
+                                             # Move + resize by ID
+interceptor window resize --state maximized  # State change for current window; do not combine
+                                             # maximized/fullscreen/minimized with geometry
 ```
 
 ### Network — Passive Capture (always on)
