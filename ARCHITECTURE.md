@@ -2,7 +2,7 @@
 
 This document describes the live architecture as of the current monitor, CSP-fallback, native-capture, multi-surface control (CDP / native runtime agent + hook fabric), and capability-blind extension-fabric implementation. It is not a tutorial — it explains *how the pieces fit*, with file references. For user-facing usage see `README.md` / `AGENTS.md`.
 
-**Control surfaces.** Interceptor drives four surfaces, all brokered by the one daemon and addressed by `--context`: (1) the user's real **browser** (MV3 extension); (2) the macOS **bridge** (outside-in native control — AX, input, capture); (3) **CDP** for Electron/Chromium app web contents (`cdp:`/`app:`); (4) the in-process **native runtime agent** (`runtime:`). A **capability-blind extension fabric** lets operators add further surfaces without forking the product. The browser/monitor subsystems below are the oldest and deepest; the four-surface model and the fabric are documented in the *macOS bridge*, *CDP app control*, *Native Agent*, and *Extension Fabric* subsections under **Other Subsystems**.
+**Control surfaces.** Interceptor drives five surfaces, all brokered by the one daemon and addressed by `--context`: (1) the user's real **browser** (MV3 extension); (2) the macOS **bridge** (outside-in native control — AX, input, capture); (3) **CDP** for Electron/Chromium app web contents (`cdp:`/`app:`); (4) the in-process **native runtime agent** (`runtime:`); (5) the **iOS device** surface (`ios:<udid>`) — our own in-tree on-device XCUITest runner (InterceptorRunner) that dials INTO the daemon over WebSocket, launched over a pure-Bun developer channel (usbmux / lockdown / userspace RemoteXPC tunnel + testmanagerd on iOS 17+; no WebDriverAgent, no Xcode required). A **capability-blind extension fabric** lets operators add further surfaces without forking the product. The browser/monitor subsystems below are the oldest and deepest; the surface model and the fabric are documented in the *macOS bridge*, *CDP app control*, *Native Agent*, *iOS device surface*, and *Extension Fabric* subsections under **Other Subsystems**.
 
 ---
 
@@ -283,6 +283,62 @@ contexts. See `.agents/skills/interceptor-macos/references/cdp-app.md`.
 Why CDP here despite the browser surface's zero-CDP rule: that rule defends the
 user's *real browser* against anti-bot fingerprinting. These are the user's *own*
 apps — no adversary — so CDP is the correct primitive, not an escalation.
+
+### iOS device surface — on-device InterceptorRunner (`ios:<udid>`)
+
+The fifth surface: drive *any installed app* on an owned,
+unlocked, Developer-Mode iPhone via **our own in-tree XCUITest runner**,
+[`ios/InterceptorRunner/`](ios/InterceptorRunner/) — **not** WebDriverAgent. Host
+side lives in [`daemon/ios/`](daemon/ios/) + [`cli/commands/ios.ts`](cli/commands/ios.ts)
++ [`shared/ios-device.ts`](shared/ios-device.ts).
+
+**Topology mirrors the browser extension and the in-process `runtime:` agent, not
+the CDP app channel: the device dials IN.** The on-device InterceptorRunner opens
+a WebSocket to this daemon and registers `{type:"ios", udid, token}` (parallel to
+the extension's `{type:"extension"}`). `IosManager` (`daemon/ios/manager.ts`,
+parallel to `cdpManager`) validates the per-session `token` — injected into the
+runner at launch and never reused — binds the socket to a `RunnerChannel`
+(`daemon/ios/channel.ts`), and drives the runner over that socket with `{id,
+action}` → `{id, result}` frames. Registration is keyed by udid slug
+(case-insensitive) so a runner reporting either the raw devicectl UDID or a
+lower-cased context slug resolves to the same pending `enable`. Concurrent verbs
+on a not-yet-connected device share one in-flight launch (dedup by `contextId`),
+so they can't double-launch and orphan a runner.
+
+Two launch paths, selected by `preferNoXcodeIosPath()`:
+
+- **No-Xcode.** Everything is done in pure Bun with no Xcode,
+  no root helper, and the *end user's own* Apple ID. `daemon/ios/lockdown.ts`
+  speaks the lockdown/pairing protocol over macOS's own `usbmuxd`;
+  `daemon/ios/signer.ts` re-signs the bundled unsigned runner with the user's
+  cert/profile (`keychain.ts`); `daemon/ios/installer.ts` installs it over AFC;
+  `daemon/ios/usertunnel.ts` stands up the userspace CoreDeviceProxy tunnel + RSD
+  + DDI lookup and completes the `testmanagerd` DTX handshake
+  (`daemon/ios/testmanagerd.ts`) to launch the runner. `ddi.ts` mounts the
+  developer disk image. Certs/profiles are created at `interceptor ios setup`;
+  a 6-hour background timer re-signs before free-tier expiry (`state.ts`).
+- **Xcode (operator machines).** `xcodebuild test-without-building` against the
+  bundled `.xctestrun` installs + launches the runner and Xcode owns the iOS 17+
+  tunnel + DDI.
+
+Either way the runner then dials back into the daemon WS. A legacy `--wda-url`
+HTTP path (`daemon/ios/wda-client.ts`, `usbmux-forward.ts` port-forward — pure
+Bun, no `go-ios`/`pymobiledevice3`) remains only as a deprecated escape hatch.
+
+The runner's element-tree snapshot is parsed into a ref-registered tree
+(`daemon/ios/tree.ts`) mirroring the macOS AX output; **refs carry frames so
+actuation is a deterministic coordinate tap** (robust against handle staleness).
+Screenshots are VLM-budget resized via `sips -Z` (no new dependency). iOS
+XCUITest AX ops are slow, so `ios_*` actions get an elevated request timeout
+(`daemon/index.ts`, `cli/transport.ts`).
+
+Routing: an `ios:`-prefixed `contextId` (or an `ios_*` lifecycle/verb action) is
+routed to `iosManager` in both the socket and WebSocket daemon handlers, exactly
+like `cdp:`; `validateContextRouting` gains an `iosContexts` param; `interceptor
+contexts` lists `ios:<udid>` alongside the rest. Capability-blind: the shipped pkg
+carries an **unsigned** runner and **no** signing material — signing is delegated
+at runtime to the user's Apple ID (no-Xcode path) or the operator's Xcode config
+(`scripts/audit-capability-blind.sh` check #4). See `docs/ios/app-route.md`.
 
 ### Native Agent — CDP-depth inside native apps
 

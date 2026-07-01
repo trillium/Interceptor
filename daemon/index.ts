@@ -23,10 +23,21 @@ import { formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecove
 import { clearDaemonRuntimeFiles, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon } from "./lifecycle"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
+import { IosManager } from "./ios/manager"
+import { IOS_ACTION_TYPES, IOS_CONTEXT_PREFIX, IOS_REGISTER_TYPE, IOS_VERB_TYPES } from "../shared/ios-device"
 import {
   NATIVE_REGISTER_TYPE, NATIVE_DELEGATE_TYPE, NATIVE_CONTEXT_PREFIX,
   type NativeAgentState, type CodeSlice, type NativeWayIn,
 } from "../shared/native-agent"
+
+// Legacy experiment: older packages could run this binary as the
+// com.interceptor.ios-tunnel root helper. Current packages remove that helper;
+// keep the branch only so old installs fail predictably instead of falling into
+// normal daemon startup.
+if (process.argv.includes("--ios-tunnel-helper")) {
+  const { runTunnelHelper } = await import("./ios/tunnel-helper/helper")
+  await runTunnelHelper()
+}
 
 // ── Native Bridge (interceptor-bridge) connection ────────────────────────────────
 const BRIDGE_SOCKET_PATH = "/tmp/interceptor-bridge.sock"
@@ -787,6 +798,16 @@ const cdpManager = new CdpManager({
   mv2ExtensionDir: resolveMv2ExtDir,
 })
 
+// iOS device surface: our own on-device InterceptorRunner (XCUITest)
+// dials INTO this daemon WS and registers {type:"ios"}, exactly like the browser
+// extension and the in-process native agent. The manager drives it over that
+// socket (RunnerChannel) — no WebDriverAgent. Keyed by ios:<udid>, parallel to
+// cdpManager. A legacy --wda-url HTTP path remains as a deprecated escape hatch.
+const iosManager = new IosManager({
+  emit: (event, data) => emitEvent(event, data || {}),
+  wsPort: WS_PORT,
+})
+
 function drainWsOutboundQueue(ctxId: string): void {
   const ws = extensionWsMap.get(ctxId)
   if (!ws) return
@@ -942,7 +963,12 @@ type BinarySinkState = {
 const binarySinks = new Map<string, BinarySinkState>()
 
 function requestTimeoutForAction(actionType: string): number {
-  return actionType === "binary_sink_save" ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+  if (actionType === "binary_sink_save") return LONG_REQUEST_TIMEOUT_MS
+  // iOS XCUITest AX ops (element-tree snapshot, app activate/launch) are slow —
+  // the FIRST snapshot initializes the on-device accessibility bridge and waits
+  // for app quiescence, which routinely exceeds the generic 15s budget.
+  if (actionType.startsWith("ios_")) return 60_000
+  return REQUEST_TIMEOUT_MS
 }
 
 function sendWsResult(ws: { send: (data: string) => unknown }, id: unknown, result: Record<string, unknown>) {
@@ -1231,7 +1257,7 @@ try {
           emitEvent("request_received", { requestId: id, action: actionType })
 
           if (action?.type === "contexts") {
-            const list = [...extensionWsMap.keys(), ...cdpManager.contextIds()]
+            const list = [...extensionWsMap.keys(), ...cdpManager.contextIds(), ...iosManager.contextIds()]
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: list } }))
             continue
           }
@@ -1254,6 +1280,20 @@ try {
             cdpManager.executeVerb(request.contextId, (action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
               .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
               .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `cdp verb failed: ${(err as Error).message}` } })))
+            continue
+          }
+
+          // iOS device surface: lifecycle actions → manager; verbs for ios: contexts → manager.
+          if (action?.type && IOS_ACTION_TYPES.has(action.type)) {
+            iosManager.handle(action as { type: string; [k: string]: unknown })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          if ((action?.type && IOS_VERB_TYPES.has(action.type)) || (request.contextId && request.contextId.startsWith(IOS_CONTEXT_PREFIX))) {
+            iosManager.executeVerb(request.contextId ?? "", (action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios verb failed: ${(err as Error).message}` } })))
             continue
           }
 
@@ -1293,6 +1333,7 @@ try {
             connectedContexts: [...extensionWsMap.keys()],
             nativeRelayAvailable: !!nativeRelaySocket,
             cdpContexts: cdpManager.contextIds(),
+            iosContexts: iosManager.contextIds(),
           })
           if (!contextValidation.ok) {
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
@@ -1385,6 +1426,14 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           return
         }
 
+        // iOS InterceptorRunner: once a socket has registered as a
+        // runner, all its frames are {id,result} verb replies — route them to the
+        // manager's RunnerChannel before any generic {id,result} handling.
+        if (iosManager.isRunnerSocket(ws as any)) {
+          iosManager.handleRunnerMessage(ws as any, request as { id?: string; result?: { success: boolean; data?: unknown; error?: string } })
+          return
+        }
+
         if (request.type === "extension") {
           const ctxId = request.contextId ?? "default"
           const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId)
@@ -1440,6 +1489,19 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           return
         }
 
+        // iOS device surface: the on-device InterceptorRunner dials in
+        // and registers {type:"ios", udid, token}. The manager validates the
+        // per-session token, binds the socket to a RunnerChannel, and the daemon
+        // tags it so subsequent frames route to handleRunnerMessage (above).
+        if (request.type === IOS_REGISTER_TYPE) {
+          const r = request as { udid?: string; token?: string; contextId?: string }
+          const ack = iosManager.registerRunner(ws as any, r)
+          try { ws.send(JSON.stringify({ type: IOS_REGISTER_TYPE, ...ack })) } catch {}
+          if (ack.ok) log(`ws ios runner registered [context: ${ack.contextId}]`)
+          else log(`ws ios runner registration rejected: ${ack.error}`)
+          return
+        }
+
         if (request.type === "keepalive") {
           log("ws keepalive")
           return
@@ -1475,11 +1537,26 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           return
         }
 
+        // iOS device surface over the WebSocket transport (screenshot etc.).
+        if (IOS_ACTION_TYPES.has(actionType)) {
+          iosManager.handle(request.action as { type: string; [k: string]: unknown })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        if ((IOS_VERB_TYPES.has(actionType)) || (request.contextId && request.contextId.startsWith(IOS_CONTEXT_PREFIX))) {
+          iosManager.executeVerb(request.contextId ?? "", (request.action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios verb failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+
         const contextValidation = validateContextRouting({
           contextId: request.contextId,
           connectedContexts: [...extensionWsMap.keys()],
           nativeRelayAvailable: !!nativeRelaySocket,
           cdpContexts: cdpManager.contextIds(),
+          iosContexts: iosManager.contextIds(),
         })
         if (!contextValidation.ok) {
           ws.send(JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
@@ -1508,6 +1585,10 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
         sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
       },
       close(ws) {
+        // iOS InterceptorRunner socket closed → drop its channel + context.
+        if (iosManager.isRunnerSocket(ws as any)) {
+          iosManager.handleRunnerClose(ws as any)
+        }
         const ctxId = (ws as any).__contextId
         if (ctxId && extensionWsMap.get(ctxId) === ws) {
           extensionWsMap.delete(ctxId)
@@ -1530,6 +1611,7 @@ function gracefulShutdown(signal: string) {
   }
   pendingRequests.clear()
   try { cdpManager.shutdown() } catch {} // close outbound CDP sockets + disable Fetch/Network on targets
+  try { iosManager.shutdown() } catch {} // close WDA sessions + kill tunnel/forward/runner processes
   if (socketServer) {
     socketServer.stop(true)
     socketServer = null

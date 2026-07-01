@@ -515,4 +515,13 @@ macOS Bridge (full install only):
   Notifications (UN extension to existing notifications domain):
   interceptor macos notifications status|request|settings|post|schedule-after|schedule-at|schedule-cron|cancel|cancel-all|pending|delivered|dismiss|dismiss-all
   interceptor macos notifications post --title "..." --body "..." [--sound default] [--badge N] [--category <id>]
-  interceptor macos notifications categories list|register|clear`
+  interceptor macos notifications categories list|register|clear
+
+  iOS — automate your iPhone (pre-built agent, no signing/env):
+  interceptor ios install [<device>]         Push the agent to a phone (plugged in + unlocked)
+  interceptor ios devices                     Phones with the agent (+ names)
+  interceptor ios name <device> <alias>       Rename a phone (then use --on <alias>)
+  interceptor ios tree|find|inspect [--on <name>]                   On-screen elements (auto-connects)
+  interceptor ios click|type|keys|scroll|drag|press [--on <name>]   Trusted XCUITest input
+  interceptor ios screenshot | apps | app launch|activate|terminate <id> [--on <name>]
+  Run 'interceptor ios help' for the full iOS surface.`

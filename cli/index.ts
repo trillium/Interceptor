@@ -27,6 +27,7 @@ import { parseSseCommand } from "./commands/sse"
 import { runCompoundCommand } from "./commands/compound"
 import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
+import { runIosCommand } from "./commands/ios"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
 import { runResearchCommand } from "./commands/research"
@@ -53,6 +54,7 @@ const SSE_CMDS = new Set(["sse"])
 const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
+const IOS_CMDS = new Set(["ios"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const INIT_CMDS = new Set(["init"])
 const RESEARCH_CMDS = new Set(["research"])
@@ -69,7 +71,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
-  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
+  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS, ...IOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   "help", "contexts",
 ])
@@ -139,6 +141,10 @@ async function main() {
       await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
       return
     }
+    if (cmd === "ios") {
+      await runIosCommand(filtered, { jsonMode, contextId: globalContextId })
+      return
+    }
     if (cmd === "extensions") {
       runExtensionsCommand(filtered, jsonMode)
       return
@@ -174,6 +180,11 @@ async function main() {
 
   if (MACOS_CMDS.has(cmd)) {
     await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
+    return
+  }
+
+  if (IOS_CMDS.has(cmd)) {
+    await runIosCommand(filtered, { jsonMode, contextId: globalContextId })
     return
   }
 

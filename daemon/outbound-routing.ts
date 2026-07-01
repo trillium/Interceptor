@@ -37,14 +37,20 @@ export function validateContextRouting(input: {
    *  but they participate in disambiguation messages so the operator is told to
    *  use --context when only a CDP context exists. */
   cdpContexts?: string[]
+  /** iOS device contexts (ios:<udid>). Like cdpContexts, verbs for these are
+   *  routed before this check; they participate in disambiguation so the operator
+   *  is told to use --context when only an iOS context exists. */
+  iosContexts?: string[]
 }): ContextRoutingValidation {
   const { contextId, connectedContexts, nativeRelayAvailable } = input
   const cdpContexts = input.cdpContexts ?? []
+  const iosContexts = input.iosContexts ?? []
+  const auxContexts = [...cdpContexts, ...iosContexts]
 
   if (contextId) {
     if (connectedContexts.includes(contextId)) return { ok: true }
-    if (cdpContexts.includes(contextId)) return { ok: true }
-    const all = [...connectedContexts, ...cdpContexts]
+    if (auxContexts.includes(contextId)) return { ok: true }
+    const all = [...connectedContexts, ...auxContexts]
     const hint = all.length > 0
       ? ` (connected: ${all.join(", ")})`
       : " (no contexts connected)"
@@ -54,14 +60,16 @@ export function validateContextRouting(input: {
   if (connectedContexts.length === 1) return { ok: true }
   if (connectedContexts.length === 0 && nativeRelayAvailable) return { ok: true }
   if (connectedContexts.length === 0) {
-    if (cdpContexts.length > 0) {
-      return { ok: false, error: `no extensions connected; a CDP app context exists — use --context ${cdpContexts.length === 1 ? cdpContexts[0] : "<id>"} (cdp: ${cdpContexts.join(", ")})` }
+    if (auxContexts.length > 0) {
+      const label = cdpContexts.length && iosContexts.length ? "CDP/iOS"
+        : iosContexts.length ? "iOS device" : "CDP app"
+      return { ok: false, error: `no extensions connected; a ${label} context exists — use --context ${auxContexts.length === 1 ? auxContexts[0] : "<id>"} (${auxContexts.join(", ")})` }
     }
     return { ok: false, error: "no extensions connected" }
   }
 
   return {
     ok: false,
-    error: `multiple extensions connected, use --context <id> (connected: ${[...connectedContexts, ...cdpContexts].join(", ")})`,
+    error: `multiple extensions connected, use --context <id> (connected: ${[...connectedContexts, ...auxContexts].join(", ")})`,
   }
 }
