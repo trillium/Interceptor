@@ -64,6 +64,8 @@ Flags:
   -V, --version                       Print version, build SHA, and build date
   --json                              Output as JSON
   --context <id>                      Target a specific browser context (see: interceptor contexts)
+  --group <label>                     Scope this command to a named tab group (per-agent isolation; env: INTERCEPTOR_GROUP)
+  --group-color <color>               Color for the group when it is first created (default: auto from label)
 
 Compound (agent-optimized):
   interceptor open <url>                     Open URL in a background tab (default), wait, return tree + text
@@ -309,6 +311,11 @@ Meta:
 Branding:
   interceptor brand tab-group --title <label> [--color <color>]
                                              White-label the Chrome tab-group label/color at runtime (no rebuild)
+
+Tab groups (per-agent isolation):
+  interceptor open <url> --group <label>     Open into the named group "<brand>-<label>" (created on first use)
+  interceptor group list                     All live tab groups: label, title, color, tab count
+  interceptor group close <label>            Atomically close every tab in a named group (other groups untouched)
 
 macOS App Internals:
   interceptor macos cdp connect <port> [--host H] [--app NAME] [--url HINT]

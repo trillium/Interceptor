@@ -13,10 +13,10 @@
  * `registerBrandTabGroup()` is called ONLY from the MV3 background.ts entry.
  */
 
-import { ensureInterceptorGroup } from "./tab-group"
+import { ensureInterceptorGroup, retitleNamedGroupsForBrand } from "./tab-group"
 
 // Closed Chrome tabGroups color enum (verified against the tabGroups API docs).
-const VALID_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"] as const
+export const VALID_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"] as const
 export type TabGroupColor = (typeof VALID_COLORS)[number]
 
 export const DEFAULT_TAB_GROUP_TITLE = "interceptor"
@@ -156,6 +156,11 @@ async function onBrandChanged(change: chrome.storage.StorageChange): Promise<voi
   // Make the OLD title discoverable BEFORE re-discovery runs, so ensureInterceptorGroup's candidate
   // set can still find a group that currently bears the old label.
   if (prevTitle) await setPreviousTitle(prevTitle)
+
+  // Named per-agent groups follow the brand: retitle each to `${newTitle}-${label}`.
+  // Id-keyed, so this is purely cosmetic and cannot orphan; runs regardless of
+  // whether the DEFAULT group exists.
+  await retitleNamedGroupsForBrand()
 
   // Adopt-then-retitle. ensureInterceptorGroup re-discovers via the candidate set and returns -1 when
   // the tabGroups API is absent (MV2) or no group exists yet.

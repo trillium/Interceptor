@@ -178,6 +178,11 @@ interceptor tab new <url>             # Background tab in the interceptor group
 interceptor tab new <url> --activate  # Explicit foregrounding
 interceptor tab switch <tab-id>
 interceptor tab close <tab-id>
+
+interceptor open <url> --group <label>   # Open into a named per-agent group "<brand>-<label>" (created on first use)
+interceptor read --group <label>         # Any command scopes to that group's tabs; env INTERCEPTOR_GROUP is the fallback
+interceptor group list                   # All live tab groups: label, title, color, tab count
+interceptor group close <label>          # Atomically close every tab in a named group (other groups untouched)
 interceptor window list
 interceptor window new
 interceptor window focus <window-id>                      # Explicit focus move
@@ -187,6 +192,8 @@ interceptor window resize --state maximized               # Don't combine maximi
 ```
 
 Use `--tab <id>` for a specific tab; `--any-tab` only when explicitly authorized.
+
+When several agents share one browser context, give each its own `--group <label>` (or set `INTERCEPTOR_GROUP` once per agent): every command then resolves and acts only within that agent's tab group, `--reuse` reuses only that group's tabs, and cross-group targets are rejected. Labels match `[A-Za-z0-9_-]{1,32}`; pick a color with `--group-color <grey|blue|red|yellow|green|pink|purple|cyan|orange>` on first open. Close your group when the job is done.
 
 ## Cookies / Storage / History / Bookmarks
 

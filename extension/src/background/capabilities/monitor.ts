@@ -1,5 +1,23 @@
 import { sendToHost } from "../transport"
-import { addTabToInterceptorGroup, ensureInterceptorGroup, isTabInInterceptorGroup } from "../tab-group"
+import { addTabToInterceptorGroup, ensureInterceptorGroup, isTabInAnyManagedGroup, ensureNamedGroup } from "../tab-group"
+
+// a child tab belongs to its OPENER's group (named or default), so a
+// grouped agent's popups / child navigations stay inside that agent's group
+// instead of always landing in the default group.
+async function adoptChildTab(childTabId: number, openerTabId?: number): Promise<void> {
+  try {
+    if (openerTabId !== undefined && chrome.tabGroups) {
+      const opener = await chrome.tabs.get(openerTabId)
+      if (opener.groupId !== -1 && (await isTabInAnyManagedGroup(openerTabId))) {
+        await chrome.tabs.group({ tabIds: childTabId, groupId: opener.groupId })
+        return
+      }
+    }
+  } catch {
+    // opener vanished — fall through to the default group.
+  }
+  await addTabToInterceptorGroup(childTabId)
+}
 
 const FOCUS_SWITCH_GUARD_MS = 2000
 
@@ -338,7 +356,7 @@ function registerWebNavListenersOnce(): void {
     if (pendingChild) {
       const session = sessions.get(pendingChild.sessionId)
       if (session && !session.paused) {
-        addTabToInterceptorGroup(details.tabId).catch(() => {})
+        adoptChildTab(details.tabId, pendingChild.openerTabId).catch(() => {})
         switchToAttachment(
           session,
           createAttachment(
@@ -485,9 +503,10 @@ async function handleFocusActivated(tabId: number): Promise<void> {
   // reason "child_tab" once the child document commits.
   if (pendingChildTabs.has(tabId)) return
 
-  // Privacy: only auto-attach to tabs the user opted into via the interceptor group.
+  // Privacy: only auto-attach to tabs the user opted into via a managed group
+  // (the default Interceptor group or any named per-agent group).
   let inGroup = false
-  try { inGroup = await isTabInInterceptorGroup(tabId) } catch { return }
+  try { inGroup = await isTabInAnyManagedGroup(tabId) } catch { return }
   if (!inGroup) return
 
   // Recheck — async gap above could have racing onCreated handoff
@@ -665,7 +684,20 @@ function monitorRuntimeMessageListener(
   return true
 }
 
-async function resolveTabForMonitor(): Promise<{ tabId?: number; error?: string }> {
+async function resolveTabForMonitor(group?: string): Promise<{ tabId?: number; error?: string }> {
+  if (group) {
+    // group-scoped resolution — only that group's tabs, never the
+    // browser-active tab (which may be another agent's).
+    const namedGroupId = await ensureNamedGroup(group)
+    if (namedGroupId !== -1) {
+      const tabs = await chrome.tabs.query({ groupId: namedGroupId })
+      if (tabs.length > 0) {
+        const active = tabs.find((tab) => tab.active) || tabs[0]
+        if (active.id) return { tabId: active.id }
+      }
+    }
+    return { error: `group '${group}' has no tabs — open one with 'interceptor open <url> --group ${group}'` }
+  }
   const groupId = await ensureInterceptorGroup()
   if (groupId !== -1) {
     const tabs = await chrome.tabs.query({ groupId })
@@ -676,7 +708,7 @@ async function resolveTabForMonitor(): Promise<{ tabId?: number; error?: string 
   }
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (activeTab?.id) {
-    const inGroup = await isTabInInterceptorGroup(activeTab.id)
+    const inGroup = await isTabInAnyManagedGroup(activeTab.id)
     if (inGroup) return { tabId: activeTab.id }
   }
   return { error: "no interceptor-managed tab found — use 'interceptor tab new' or pass --tab" }
@@ -703,7 +735,9 @@ export async function handleMonitorActions(
     case "monitor_start": {
       let resolvedTabId = tabId
       if (!resolvedTabId) {
-        const resolved = await resolveTabForMonitor()
+        const resolved = await resolveTabForMonitor(
+          typeof action.group === "string" && action.group.length > 0 ? action.group : undefined
+        )
         if (resolved.error || !resolved.tabId) {
           return { success: false, error: resolved.error || "no interceptor-managed tab found" }
         }
