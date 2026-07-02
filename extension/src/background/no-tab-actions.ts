@@ -5,7 +5,7 @@ export const NO_TAB_ACTIONS = new Set([
   "bookmark_create", "downloads_search", "browsing_data_remove",
   "session_list", "session_restore", "notification_create", "notification_clear",
   "search_query", "monitor_status", "monitor_start", "monitor_pause", "monitor_resume",
-  "monitor_stop", "brand_set_tab_group"
+  "monitor_stop", "brand_set_tab_group", "group_list", "group_close"
 ])
 
 export function needsTab(type: string): boolean {

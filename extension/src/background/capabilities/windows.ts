@@ -1,4 +1,4 @@
-import { addTabToInterceptorGroup } from "../tab-group"
+import { addTabToInterceptorGroup, addTabToNamedGroup, GROUP_LABEL_RE } from "../tab-group"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
@@ -79,7 +79,13 @@ export async function handleWindowActions(
         const firstTab = win.tabs?.[0]
         let groupId: number | undefined
         if (firstTab?.id && !action.incognito) {
-          groupId = await addTabToInterceptorGroup(firstTab.id)
+          // honor the caller's named group; default group otherwise.
+          const group = typeof action.group === "string" && GROUP_LABEL_RE.test(action.group)
+            ? action.group
+            : undefined
+          groupId = group
+            ? await addTabToNamedGroup(firstTab.id, group, action.groupColor)
+            : await addTabToInterceptorGroup(firstTab.id)
         }
         return {
           success: true,

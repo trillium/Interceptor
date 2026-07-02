@@ -14,7 +14,8 @@ This installed skill is self-contained. Source checkouts also have `AGENTS.md`, 
 ## Core Rules
 
 - Use compound commands (`open`, `read`, `act`, `inspect`) before low-level verbs.
-- Browser commands operate inside the cyan `interceptor` tab group. Do not use `--any-tab` unless the user explicitly authorizes acting outside that group.
+- Browser commands operate inside managed Interceptor tab groups. Do not use `--any-tab` unless the user explicitly authorizes acting outside those groups.
+- When other agents may share this browser, scope yourself with `--group <label>` on every command (or set `INTERCEPTOR_GROUP` once): your tabs live in their own colored group, resolution never leaves it, and cross-group targets are rejected. Run `interceptor group close <label>` when your job is done; `interceptor group list` shows what's running.
 - `interceptor open <url>` and `interceptor tab new <url>` create background tabs by default. Only `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus.
 - If multiple browser profiles are connected, run `interceptor contexts` and pass `--context <id>`.
 - Prefer structured reads (`read`, `tree`, `text`, `inspect`, `scene`) before screenshots. Open `references/screenshot-policy.md` before screenshot-heavy work.

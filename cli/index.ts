@@ -1,7 +1,7 @@
 import { HELP, helpForCommand } from "./help"
-import { parseTabFlag, parseContextFlag } from "./parse"
+import { parseTabFlag, parseContextFlag, parseGroupFlag, parseGroupColorFlag } from "./parse"
 import { formatState, formatTabs, formatCookies, formatResult } from "./format"
-import { sendCommand, sendCommandWs, type DaemonResult, type DaemonResponse } from "./transport"
+import { sendCommand, sendCommandWs, setGlobalGroup, type DaemonResult, type DaemonResponse } from "./transport"
 import { fromPassive, writeExport, type PassiveNetEntry, type ExportFormat } from "../shared/exports"
 import {
   attachMonitorTaskSource,
@@ -20,6 +20,7 @@ import { parseMetaCommand } from "./commands/meta"
 import { parseEvalCommand } from "./commands/eval"
 import { parseSaveCommand } from "./commands/save"
 import { parseBrandCommand } from "./commands/brand"
+import { parseGroupCommand } from "./commands/group"
 import { parseBatchCommand } from "./commands/batch"
 import { parseMonitorCommand } from "./commands/monitor"
 import { parseSceneCommand } from "./commands/scene"
@@ -47,6 +48,7 @@ const META_CMDS = new Set(["status", "reload", "meta", "links", "images", "forms
 const EVAL_CMDS = new Set(["eval"])
 const SAVE_CMDS = new Set(["save"])
 const BRAND_CMDS = new Set(["brand"])
+const GROUP_CMDS = new Set(["group"])
 const BATCH_CMDS = new Set(["batch", "raw"])
 const MONITOR_CMDS = new Set(["monitor"])
 const SCENE_CMDS = new Set(["scene"])
@@ -70,7 +72,7 @@ const NO_DAEMON = new Set(["status", "help", "events", "session", "upgrade", "in
 const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
-  ...SAVE_CMDS, ...BRAND_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
+  ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS, ...IOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   "help", "contexts",
@@ -102,6 +104,10 @@ async function main() {
   const anyTab = args.includes("--any-tab")
   const globalTabId = parseTabFlag(args)
   const globalContextId = parseContextFlag(args)
+  // --group / $INTERCEPTOR_GROUP scopes this invocation to a named tab
+  // group. Injected into every outgoing action at the transport choke point, so
+  // simple, compound, and looping command paths are all covered.
+  setGlobalGroup(parseGroupFlag(args), parseGroupColorFlag(args))
 
   // Build filtered args (strip global flags). NB: --json is dual-purpose —
   // it can be a global "emit JSON output" boolean OR a domain-specific
@@ -252,6 +258,7 @@ async function main() {
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)
+  else if (GROUP_CMDS.has(cmd))  action = parseGroupCommand(filtered)
   else if (BATCH_CMDS.has(cmd))  action = parseBatchCommand(filtered)
   else if (MONITOR_CMDS.has(cmd)) action = await parseMonitorCommand(filtered, jsonMode)
   else if (SCENE_CMDS.has(cmd))   action = await parseSceneCommand(filtered, jsonMode)

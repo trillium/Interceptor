@@ -46,7 +46,8 @@ const CANVAS_ACTIONS = new Set([
 const TAB_ACTIONS = new Set([
   "tab_create", "tab_close", "tab_switch", "tab_list", "tab_duplicate",
   "tab_reload", "tab_mute", "tab_pin", "tab_zoom_get", "tab_zoom_set",
-  "tab_group", "tab_ungroup", "tab_move", "tab_discard"
+  "tab_group", "tab_ungroup", "tab_move", "tab_discard",
+  "group_list", "group_close"
 ])
 const WINDOW_ACTIONS = new Set([
   "window_create", "window_close", "window_focus", "window_resize", "window_list", "window_get_all"

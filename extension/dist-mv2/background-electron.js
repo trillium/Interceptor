@@ -45,6 +45,136 @@ var interceptorGroupId = null;
 function hasTabGroupApi() {
   return !!chrome.tabGroups && typeof chrome.tabGroups.query === "function";
 }
+var GROUP_LABEL_RE = /^[A-Za-z0-9_-]{1,32}$/;
+var SESSION_NAMED_GROUPS_KEY = "namedTabGroups";
+var namedGroups = new Map;
+var namedGroupsHydrated = false;
+function sessionArea2() {
+  const storage = chrome.storage;
+  return storage.session;
+}
+async function hydrateNamedGroups() {
+  if (namedGroupsHydrated)
+    return;
+  namedGroupsHydrated = true;
+  try {
+    const area = sessionArea2();
+    if (!area)
+      return;
+    const stored = await area.get(SESSION_NAMED_GROUPS_KEY);
+    const raw = stored?.[SESSION_NAMED_GROUPS_KEY];
+    if (raw && typeof raw === "object") {
+      for (const [label, gid] of Object.entries(raw)) {
+        if (GROUP_LABEL_RE.test(label) && typeof gid === "number")
+          namedGroups.set(label, gid);
+      }
+    }
+  } catch {}
+}
+async function persistNamedGroups() {
+  try {
+    const area = sessionArea2();
+    if (!area)
+      return;
+    await area.set({ [SESSION_NAMED_GROUPS_KEY]: Object.fromEntries(namedGroups) });
+  } catch {}
+}
+function groupTitleFor(label) {
+  return `${getTabGroupTitle()}-${label}`;
+}
+function colorForLabel(label) {
+  let h = 0;
+  for (let i = 0;i < label.length; i++)
+    h = h * 31 + label.charCodeAt(i) >>> 0;
+  return VALID_COLORS[h % VALID_COLORS.length];
+}
+async function purgeNamedGroupEntry(label) {
+  namedGroups.delete(label);
+  await persistNamedGroups();
+  try {
+    const area = sessionArea2();
+    if (area)
+      await area.remove(`activeTabId:${label}`);
+  } catch {}
+}
+async function ensureNamedGroup(label) {
+  if (!hasTabGroupApi())
+    return -1;
+  await hydrateNamedGroups();
+  const known = namedGroups.get(label);
+  if (known !== undefined) {
+    try {
+      await chrome.tabGroups.get(known);
+      return known;
+    } catch {
+      await purgeNamedGroupEntry(label);
+    }
+  }
+  const title = groupTitleFor(label);
+  const groups = await chrome.tabGroups.query({});
+  const match = groups.find((g) => g.title === title);
+  if (match) {
+    namedGroups.set(label, match.id);
+    await persistNamedGroups();
+    return match.id;
+  }
+  return -1;
+}
+function addTabToNamedGroup(tabId, label, colorOverride) {
+  return serializeGroupAdd(label, () => addTabToNamedGroupSerialized(tabId, label, colorOverride));
+}
+async function addTabToNamedGroupSerialized(tabId, label, colorOverride) {
+  if (!hasTabGroupApi() || typeof chrome.tabs.group !== "function")
+    return -1;
+  let groupId = await ensureNamedGroup(label);
+  if (groupId === -1) {
+    groupId = await chrome.tabs.group({ tabIds: tabId });
+    const color = typeof colorOverride === "string" && VALID_COLORS.includes(colorOverride) ? normalizeColor(colorOverride) : colorForLabel(label);
+    await chrome.tabGroups.update(groupId, {
+      title: groupTitleFor(label),
+      color
+    });
+    namedGroups.set(label, groupId);
+    await persistNamedGroups();
+  } else {
+    await chrome.tabs.group({ tabIds: tabId, groupId });
+  }
+  return groupId;
+}
+async function isTabInNamedGroup(tabId, label) {
+  if (!hasTabGroupApi())
+    return true;
+  const groupId = await ensureNamedGroup(label);
+  if (groupId === -1)
+    return false;
+  const tab = await chrome.tabs.get(tabId);
+  return tab.groupId === groupId;
+}
+async function isTabInAnyManagedGroup(tabId) {
+  if (!hasTabGroupApi())
+    return true;
+  const tab = await chrome.tabs.get(tabId);
+  if (interceptorGroupId === null)
+    await ensureInterceptorGroup();
+  if (interceptorGroupId !== null && tab.groupId === interceptorGroupId)
+    return true;
+  await hydrateNamedGroups();
+  for (const gid of namedGroups.values()) {
+    if (tab.groupId === gid)
+      return true;
+  }
+  return false;
+}
+function anyManagedGroupKnown() {
+  return interceptorGroupId !== null || namedGroups.size > 0;
+}
+function labelForGroupId(groupId) {
+  for (const [label, gid] of namedGroups) {
+    if (gid === groupId)
+      return label;
+  }
+  return null;
+}
 async function ensureInterceptorGroup() {
   if (!hasTabGroupApi())
     return -1;
@@ -65,7 +195,21 @@ async function ensureInterceptorGroup() {
   }
   return -1;
 }
-async function addTabToInterceptorGroup(tabId) {
+var groupAddChains = new Map;
+function serializeGroupAdd(key, op) {
+  const prev = groupAddChains.get(key) ?? Promise.resolve(-1);
+  const next = prev.then(op, op);
+  groupAddChains.set(key, next);
+  next.finally(() => {
+    if (groupAddChains.get(key) === next)
+      groupAddChains.delete(key);
+  }).catch(() => {});
+  return next;
+}
+function addTabToInterceptorGroup(tabId) {
+  return serializeGroupAdd("", () => addTabToInterceptorGroupSerialized(tabId));
+}
+async function addTabToInterceptorGroupSerialized(tabId) {
   let groupId = await ensureInterceptorGroup();
   if (groupId === -1 && (!hasTabGroupApi() || typeof chrome.tabs.group !== "function"))
     return -1;
@@ -80,14 +224,6 @@ async function addTabToInterceptorGroup(tabId) {
     await chrome.tabs.group({ tabIds: tabId, groupId });
   }
   return groupId;
-}
-async function isTabInInterceptorGroup(tabId) {
-  if (!hasTabGroupApi())
-    return true;
-  const tab = await chrome.tabs.get(tabId);
-  if (interceptorGroupId === null)
-    await ensureInterceptorGroup();
-  return interceptorGroupId !== null && tab.groupId === interceptorGroupId;
 }
 var SENSITIVE_ACTIONS = new Set([
   "evaluate",
@@ -1537,12 +1673,19 @@ async function handleCanvasActions(action, tabId) {
 }
 
 // extension/src/background/capabilities/tabs.ts
+function activeTabKey(group) {
+  return group ? `activeTabId:${group}` : "activeTabId";
+}
 async function handleTabActions(action, tabId) {
   switch (action.type) {
     case "tab_create": {
       const targetUrl = action.url || "about:blank";
+      const group = typeof action.group === "string" && action.group.length > 0 ? action.group : undefined;
+      if (group && !GROUP_LABEL_RE.test(group)) {
+        return { success: false, error: `invalid group label '${group}' — must match [A-Za-z0-9_-]{1,32}` };
+      }
       if (action.reuse) {
-        const groupId = await ensureInterceptorGroup();
+        const groupId = group ? await ensureNamedGroup(group) : await ensureInterceptorGroup();
         if (groupId !== -1) {
           const groupTabs = await chrome.tabs.query({ groupId });
           if (groupTabs.length > 0) {
@@ -1556,10 +1699,10 @@ async function handleTabActions(action, tabId) {
                   updateProps.active = true;
                 const updated = await chrome.tabs.update(candidate.id, updateProps);
                 await waitForTabLoad(candidate.id);
-                await chrome.storage.session.set({ activeTabId: candidate.id });
+                await chrome.storage.session.set({ [activeTabKey(group)]: candidate.id });
                 return {
                   success: true,
-                  data: { tabId: candidate.id, url: updated?.url ?? targetUrl, groupId, reused: true }
+                  data: { tabId: candidate.id, url: updated?.url ?? targetUrl, groupId, group, reused: true }
                 };
               } catch {}
             }
@@ -1569,18 +1712,21 @@ async function handleTabActions(action, tabId) {
       const shouldActivate = action.active === true;
       const newTab = await chrome.tabs.create({ url: targetUrl, active: shouldActivate });
       if (newTab.id) {
-        const groupId = await addTabToInterceptorGroup(newTab.id);
-        await chrome.storage.session.set({ activeTabId: newTab.id });
-        return { success: true, data: { tabId: newTab.id, url: newTab.url, groupId, reused: false } };
+        const groupId = group ? await addTabToNamedGroup(newTab.id, group, action.groupColor) : await addTabToInterceptorGroup(newTab.id);
+        await chrome.storage.session.set({ [activeTabKey(group)]: newTab.id });
+        return { success: true, data: { tabId: newTab.id, url: newTab.url, groupId, group, reused: false } };
       }
       return { success: true, data: { tabId: newTab.id, url: newTab.url, reused: false } };
     }
     case "tab_close": {
       const closedId = action.tabId || tabId;
       await chrome.tabs.remove(closedId);
-      const stored = await chrome.storage.session.get("activeTabId");
-      if (stored.activeTabId === closedId)
-        await chrome.storage.session.remove("activeTabId");
+      const keys = ["activeTabId", typeof action.group === "string" ? activeTabKey(action.group) : null].filter((k) => !!k);
+      const stored = await chrome.storage.session.get(keys);
+      for (const key of keys) {
+        if (stored[key] === closedId)
+          await chrome.storage.session.remove(key);
+      }
       return { success: true };
     }
     case "tab_switch": {
@@ -1591,6 +1737,8 @@ async function handleTabActions(action, tabId) {
     case "tab_list": {
       const tabs = await chrome.tabs.query({});
       await ensureInterceptorGroup();
+      await hydrateNamedGroups();
+      const namedIds = new Set(namedGroups.values());
       const tabData = tabs.map((t) => ({
         id: t.id,
         url: t.url,
@@ -1600,9 +1748,55 @@ async function handleTabActions(action, tabId) {
         muted: t.mutedInfo?.muted,
         pinned: t.pinned,
         groupId: t.groupId,
-        managed: interceptorGroupId !== null && t.groupId === interceptorGroupId
+        managed: interceptorGroupId !== null && t.groupId === interceptorGroupId || namedIds.has(t.groupId),
+        group: labelForGroupId(t.groupId)
       }));
       return { success: true, data: tabData };
+    }
+    case "group_list": {
+      if (!chrome.tabGroups || typeof chrome.tabGroups.query !== "function") {
+        return { success: true, data: [] };
+      }
+      await ensureInterceptorGroup();
+      await hydrateNamedGroups();
+      const live = await chrome.tabGroups.query({});
+      const prefix = `${groupTitleFor("")}`;
+      for (const g of live) {
+        if (typeof g.title !== "string" || !g.title.startsWith(prefix))
+          continue;
+        const label = g.title.slice(prefix.length);
+        if (GROUP_LABEL_RE.test(label) && labelForGroupId(g.id) === null && g.id !== interceptorGroupId) {
+          await ensureNamedGroup(label);
+        }
+      }
+      const data = await Promise.all(live.map(async (g) => {
+        const groupTabs = await chrome.tabs.query({ groupId: g.id });
+        return {
+          groupId: g.id,
+          title: g.title,
+          color: g.color,
+          tabCount: groupTabs.length,
+          label: labelForGroupId(g.id),
+          default: interceptorGroupId !== null && g.id === interceptorGroupId,
+          managed: interceptorGroupId !== null && g.id === interceptorGroupId || labelForGroupId(g.id) !== null
+        };
+      }));
+      return { success: true, data };
+    }
+    case "group_close": {
+      const label = action.label;
+      if (!label || !GROUP_LABEL_RE.test(label)) {
+        return { success: false, error: `group_close requires a valid label (got '${label ?? ""}')` };
+      }
+      const groupId = await ensureNamedGroup(label);
+      if (groupId === -1) {
+        return { success: false, error: `group '${label}' not found` };
+      }
+      const groupTabs = await chrome.tabs.query({ groupId });
+      const ids = groupTabs.map((t) => t.id).filter((id) => typeof id === "number");
+      if (ids.length > 0)
+        await chrome.tabs.remove(ids);
+      return { success: true, data: { label, groupId, closedTabs: ids.length } };
     }
     case "tab_duplicate": {
       const dup = await chrome.tabs.duplicate(tabId);
@@ -1715,7 +1909,8 @@ async function handleWindowActions(action, _tabId) {
         const firstTab = win.tabs?.[0];
         let groupId;
         if (firstTab?.id && !action.incognito) {
-          groupId = await addTabToInterceptorGroup(firstTab.id);
+          const group = typeof action.group === "string" && GROUP_LABEL_RE.test(action.group) ? action.group : undefined;
+          groupId = group ? await addTabToNamedGroup(firstTab.id, group, action.groupColor) : await addTabToInterceptorGroup(firstTab.id);
         }
         return {
           success: true,
@@ -3050,6 +3245,18 @@ async function handleCdpNetworkActions(action, tabId) {
 }
 
 // extension/src/background/capabilities/monitor.ts
+async function adoptChildTab(childTabId, openerTabId) {
+  try {
+    if (openerTabId !== undefined && chrome.tabGroups) {
+      const opener = await chrome.tabs.get(openerTabId);
+      if (opener.groupId !== -1 && await isTabInAnyManagedGroup(openerTabId)) {
+        await chrome.tabs.group({ tabIds: childTabId, groupId: opener.groupId });
+        return;
+      }
+    }
+  } catch {}
+  await addTabToInterceptorGroup(childTabId);
+}
 var FOCUS_SWITCH_GUARD_MS = 2000;
 var sessions = new Map;
 var activeSessionByTab = new Map;
@@ -3252,7 +3459,7 @@ function registerWebNavListenersOnce() {
     if (pendingChild) {
       const session2 = sessions.get(pendingChild.sessionId);
       if (session2 && !session2.paused) {
-        addTabToInterceptorGroup(details.tabId).catch(() => {});
+        adoptChildTab(details.tabId, pendingChild.openerTabId).catch(() => {});
         switchToAttachment(session2, createAttachment(details.tabId, details.documentId, details.frameId, details.url, details.documentLifecycle, "child_tab", pendingChild.openerTabId), "child_tab");
         emitMonEvent(session2, "nav", {
           u: details.url,
@@ -3372,7 +3579,7 @@ async function handleFocusActivated(tabId) {
     return;
   let inGroup = false;
   try {
-    inGroup = await isTabInInterceptorGroup(tabId);
+    inGroup = await isTabInAnyManagedGroup(tabId);
   } catch {
     return;
   }
@@ -3543,7 +3750,19 @@ function monitorRuntimeMessageListener(msg, sender, sendResponse) {
   }
   return true;
 }
-async function resolveTabForMonitor() {
+async function resolveTabForMonitor(group) {
+  if (group) {
+    const namedGroupId = await ensureNamedGroup(group);
+    if (namedGroupId !== -1) {
+      const tabs = await chrome.tabs.query({ groupId: namedGroupId });
+      if (tabs.length > 0) {
+        const active = tabs.find((tab) => tab.active) || tabs[0];
+        if (active.id)
+          return { tabId: active.id };
+      }
+    }
+    return { error: `group '${group}' has no tabs — open one with 'interceptor open <url> --group ${group}'` };
+  }
   const groupId = await ensureInterceptorGroup();
   if (groupId !== -1) {
     const tabs = await chrome.tabs.query({ groupId });
@@ -3555,7 +3774,7 @@ async function resolveTabForMonitor() {
   }
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (activeTab?.id) {
-    const inGroup = await isTabInInterceptorGroup(activeTab.id);
+    const inGroup = await isTabInAnyManagedGroup(activeTab.id);
     if (inGroup)
       return { tabId: activeTab.id };
   }
@@ -3578,7 +3797,7 @@ async function handleMonitorActions(action, tabId) {
     case "monitor_start": {
       let resolvedTabId = tabId;
       if (!resolvedTabId) {
-        const resolved = await resolveTabForMonitor();
+        const resolved = await resolveTabForMonitor(typeof action.group === "string" && action.group.length > 0 ? action.group : undefined);
         if (resolved.error || !resolved.tabId) {
           return { success: false, error: resolved.error || "no interceptor-managed tab found" };
         }
@@ -3856,7 +4075,9 @@ var TAB_ACTIONS = new Set([
   "tab_group",
   "tab_ungroup",
   "tab_move",
-  "tab_discard"
+  "tab_discard",
+  "group_list",
+  "group_close"
 ]);
 var WINDOW_ACTIONS = new Set([
   "window_create",
@@ -4063,7 +4284,9 @@ var NO_TAB_ACTIONS = new Set([
   "monitor_pause",
   "monitor_resume",
   "monitor_stop",
-  "brand_set_tab_group"
+  "brand_set_tab_group",
+  "group_list",
+  "group_close"
 ]);
 function needsTab(type) {
   return !NO_TAB_ACTIONS.has(type);
@@ -4075,16 +4298,20 @@ var messageQueue = [];
 var EXT_REQUEST_TIMEOUT_MS = 180000;
 var EXT_LONG_REQUEST_TIMEOUT_MS = 600000;
 var pendingRequests = new Map;
-async function getActiveTabId() {
-  const storage = chrome.storage;
-  const area = storage.session ?? chrome.storage.local;
-  const stored = await area.get("activeTabId");
-  return stored.activeTabId;
+function activeTabKey2(group) {
+  return group ? `activeTabId:${group}` : "activeTabId";
 }
-async function setActiveTabId(tabId) {
+async function getActiveTabId(group) {
   const storage = chrome.storage;
   const area = storage.session ?? chrome.storage.local;
-  await area.set({ activeTabId: tabId });
+  const key = activeTabKey2(group);
+  const stored = await area.get(key);
+  return stored[key];
+}
+async function setActiveTabId(tabId, group) {
+  const storage = chrome.storage;
+  const area = storage.session ?? chrome.storage.local;
+  await area.set({ [activeTabKey2(group)]: tabId });
 }
 function drainMessageQueue() {
   while (messageQueue.length > 0) {
@@ -4134,8 +4361,38 @@ async function handleDaemonMessage(msg) {
   });
   const action = msg.action;
   let tabId = msg.tabId;
+  const fail = (error) => {
+    clearTimeout(requestTimer);
+    pendingRequests.delete(msg.id);
+    sendToHost({ id: msg.id, result: { success: false, error } }, respondViaWs);
+  };
+  const groupLabel = typeof action.group === "string" && action.group.length > 0 ? action.group : undefined;
+  if (groupLabel && !GROUP_LABEL_RE.test(groupLabel)) {
+    fail(`invalid group label '${groupLabel}' — must match [A-Za-z0-9_-]{1,32}`);
+    return;
+  }
   if (!tabId && needsTab(action.type)) {
-    tabId = await getActiveTabId();
+    tabId = await getActiveTabId(groupLabel);
+    if (tabId && groupLabel) {
+      let stillInGroup = false;
+      try {
+        stillInGroup = await isTabInNamedGroup(tabId, groupLabel);
+      } catch {}
+      if (!stillInGroup)
+        tabId = undefined;
+    }
+  }
+  if (!tabId && needsTab(action.type) && groupLabel) {
+    const groupId = await ensureNamedGroup(groupLabel);
+    if (groupId !== -1) {
+      const groupTabs = await chrome.tabs.query({ groupId });
+      const candidate = groupTabs.filter((t) => typeof t.id === "number").sort((a, b) => b.id - a.id)[0];
+      tabId = candidate?.id;
+    }
+    if (!tabId) {
+      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}'`);
+      return;
+    }
   }
   if (!tabId && needsTab(action.type)) {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -4144,28 +4401,26 @@ async function handleDaemonMessage(msg) {
       setActiveTabId(tabId);
   }
   if (!tabId && needsTab(action.type)) {
-    clearTimeout(requestTimer);
-    pendingRequests.delete(msg.id);
-    sendToHost({ id: msg.id, result: { success: false, error: "no active tab" } }, respondViaWs);
+    fail("no active tab");
     return;
   }
-  if (tabId)
-    setActiveTabId(tabId);
   if (tabId && needsTab(action.type) && !action.anyTab) {
-    const inGroup = await isTabInInterceptorGroup(tabId);
-    if (!inGroup && interceptorGroupId !== null) {
-      clearTimeout(requestTimer);
-      pendingRequests.delete(msg.id);
-      sendToHost({
-        id: msg.id,
-        result: {
-          success: false,
-          error: `tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`
-        }
-      }, respondViaWs);
-      return;
+    if (groupLabel) {
+      const inNamed = await isTabInNamedGroup(tabId, groupLabel);
+      if (!inNamed) {
+        fail(`tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`);
+        return;
+      }
+    } else {
+      const inAny = await isTabInAnyManagedGroup(tabId);
+      if (!inAny && anyManagedGroupKnown()) {
+        fail(`tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`);
+        return;
+      }
     }
   }
+  if (tabId)
+    setActiveTabId(tabId, groupLabel);
   if (SENSITIVE_ACTIONS.has(action.type) && tabId && action.expectedUrl) {
     const urlErr = await verifyTabUrl(tabId, action.expectedUrl);
     if (urlErr) {

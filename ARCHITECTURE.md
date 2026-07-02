@@ -100,7 +100,7 @@ interface AttachmentRecord {
 
 ### Privacy boundary
 
-Focus-follow only attaches to tabs in the cyan **interceptor tab group** (`isTabInInterceptorGroup` in [`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts)). The user's personal tabs are never auto-attached. This boundary is preserved consistently across `tab new`, `tab switch`, and now focus-follow.
+Focus-follow only attaches to tabs in a **managed tab group** — the default interceptor group or any named per-agent group (`isTabInAnyManagedGroup` in [`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts)). The user's personal tabs are never auto-attached. This boundary is preserved consistently across `tab new`, `tab switch`, and now focus-follow.
 
 ### Lifecycle events
 
@@ -209,7 +209,17 @@ Framed refs are round-trippable. `parseElementTarget` preserves `frameId` and `r
 
 ### Tab group isolation
 
-[`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts) maintains the cyan "interceptor" tab group. By default all interceptor commands operate only on tabs in this group; `--any-tab` opts out. Focus-follow respects this boundary.
+[`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts) maintains the default "interceptor" tab group (runtime-brandable title/color via `interceptor brand tab-group`). By default all interceptor commands operate only on tabs in managed groups; `--any-tab` opts out. Focus-follow respects this boundary.
+
+### Named per-agent tab groups
+
+Multiple agents can share one browser context without touching each other's tabs. `--group <label>` (or the `INTERCEPTOR_GROUP` env var; the flag wins) scopes an invocation to a named group rendered as `<brand>-<label>` on the tab strip with a deterministic per-label color (`--group-color` overrides):
+
+- **Registry** — `tab-group.ts` keeps a `label → groupId` map mirrored to `chrome.storage.session`, whose lifetime exactly matches Chrome's session-scoped group ids. Group creation is serialized per label (concurrent creators join one group instead of minting duplicates), and a `tabGroups.onRemoved` listener purges registry entries when a group is closed — by an agent or by hand.
+- **Scoped dispatch** — each group has its own auto-target key (`activeTabId:<label>`); grouped requests resolve strictly within their group (stored target → most-recent group tab → error) and never fall back to the browser-active tab. The privacy gate requires the target tab to be in the *caller's* group, and the auto-target is persisted only after that gate passes. Ungrouped requests require membership in *any* managed group, preserving single-agent behavior.
+- **Lifecycle** — `interceptor group list` reports every live group (label, title, color, tab count); `interceptor group close <label>` closes exactly that group's tabs in one atomic `tabs.remove`. Closing one group never affects another, so a human can clean up after a dead agent while others keep running.
+- **Group identity travels inside the action payload** (`action.group`), injected at the CLI transport choke point — the daemon relays it untouched, and browsers without the `tabGroups` API (the MV2 Electron bridge, Firefox) degrade gracefully to ungrouped behavior.
+- **Monitor integration** — child tabs inherit their opener's group, and monitor auto-attach accepts any managed group.
 
 ### Transport routing (daemon)
 

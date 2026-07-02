@@ -1,7 +1,16 @@
-import { addTabToInterceptorGroup, ensureInterceptorGroup, interceptorGroupId } from "../tab-group"
+import {
+  addTabToInterceptorGroup, ensureInterceptorGroup, interceptorGroupId,
+  GROUP_LABEL_RE, ensureNamedGroup, addTabToNamedGroup, labelForGroupId,
+  namedGroups, hydrateNamedGroups, groupTitleFor
+} from "../tab-group"
 import { waitForTabLoad } from "../content-bridge"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
+
+// per-group auto-target key (mirrors message-dispatch's activeTabKey).
+function activeTabKey(group?: string): string {
+  return group ? `activeTabId:${group}` : "activeTabId"
+}
 
 export async function handleTabActions(
   action: { type: string; [key: string]: unknown },
@@ -10,13 +19,22 @@ export async function handleTabActions(
   switch (action.type) {
     case "tab_create": {
       const targetUrl = (action.url as string) || "about:blank"
+      const group = typeof action.group === "string" && action.group.length > 0
+        ? action.group
+        : undefined
+      if (group && !GROUP_LABEL_RE.test(group)) {
+        return { success: false, error: `invalid group label '${group}' — must match [A-Za-z0-9_-]{1,32}` }
+      }
       // When `reuse` is set, navigate the most recently created tab inside
-      // the Interceptor group instead of opening a new one. Long-running
-      // automations would otherwise leave a dead tab behind on every call
-      // (dora-cc#5). Falls back to creating a new tab if the group is empty
+      // the caller's group (the named group when action.group is set, the
+      // default Interceptor group otherwise) instead of opening a new one.
+      // Long-running automations would otherwise leave a dead tab behind on
+      // every call (dora-cc#5). Group-scoping the candidate query is what
+      // keeps one agent's --reuse from hijacking another agent's tab
+      // (per-agent isolation). Falls back to creating a new tab if the group is empty
       // or the candidate tab disappeared between query and update.
       if (action.reuse) {
-        const groupId = await ensureInterceptorGroup()
+        const groupId = group ? await ensureNamedGroup(group) : await ensureInterceptorGroup()
         if (groupId !== -1) {
           const groupTabs = await chrome.tabs.query({ groupId })
           if (groupTabs.length > 0) {
@@ -41,13 +59,13 @@ export async function handleTabActions(
                 await waitForTabLoad(candidate.id)
                 // Pin the reused tab as the auto-target for subsequent commands.
                 // Mirrors the new-tab path below: every successful tab_create
-                // — whether new or reused — must update activeTabId so a fresh
-                // CLI invocation (no --tab) routes here instead of a stale id
-                // or the user's foreground tab.
-                await chrome.storage.session.set({ activeTabId: candidate.id })
+                // — whether new or reused — must update the (per-group)
+                // activeTabId so a fresh CLI invocation (no --tab) routes here
+                // instead of a stale id or the user's foreground tab.
+                await chrome.storage.session.set({ [activeTabKey(group)]: candidate.id })
                 return {
                   success: true,
-                  data: { tabId: candidate.id, url: updated?.url ?? targetUrl, groupId, reused: true }
+                  data: { tabId: candidate.id, url: updated?.url ?? targetUrl, groupId, group, reused: true }
                 }
               } catch {
                 // Tab vanished between query and update — fall through to create.
@@ -64,13 +82,15 @@ export async function handleTabActions(
       const shouldActivate = (action.active as boolean | undefined) === true
       const newTab = await chrome.tabs.create({ url: targetUrl, active: shouldActivate })
       if (newTab.id) {
-        const groupId = await addTabToInterceptorGroup(newTab.id)
+        const groupId = group
+          ? await addTabToNamedGroup(newTab.id, group, action.groupColor)
+          : await addTabToInterceptorGroup(newTab.id)
         // Pin the newly-created tab as the auto-target for subsequent commands
         // so a fresh CLI invocation (no --tab) routes to this tab instead of a
         // stale activeTabId or whatever Chrome reports as "active in currentWindow"
         // (which may be the user's foreground tab, not the one we just opened).
-        await chrome.storage.session.set({ activeTabId: newTab.id })
-        return { success: true, data: { tabId: newTab.id, url: newTab.url, groupId, reused: false } }
+        await chrome.storage.session.set({ [activeTabKey(group)]: newTab.id })
+        return { success: true, data: { tabId: newTab.id, url: newTab.url, groupId, group, reused: false } }
       }
       return { success: true, data: { tabId: newTab.id, url: newTab.url, reused: false } }
     }
@@ -80,8 +100,13 @@ export async function handleTabActions(
       await chrome.tabs.remove(closedId)
       // If the closed tab was the auto-target, clear it so the next call
       // re-resolves via chrome.tabs.query rather than targeting a dead tab.
-      const stored = await chrome.storage.session.get("activeTabId") as { activeTabId?: number }
-      if (stored.activeTabId === closedId) await chrome.storage.session.remove("activeTabId")
+      // Checks the caller's per-group key too.
+      const keys = ["activeTabId", typeof action.group === "string" ? activeTabKey(action.group) : null]
+        .filter((k): k is string => !!k)
+      const stored = await chrome.storage.session.get(keys) as Record<string, number | undefined>
+      for (const key of keys) {
+        if (stored[key] === closedId) await chrome.storage.session.remove(key)
+      }
       return { success: true }
     }
 
@@ -94,13 +119,70 @@ export async function handleTabActions(
     case "tab_list": {
       const tabs = await chrome.tabs.query({})
       await ensureInterceptorGroup()
+      // Hydrate the named-group registry so labelForGroupId can attribute tabs.
+      await hydrateNamedGroups()
+      const namedIds = new Set(namedGroups.values())
       const tabData = tabs.map(t => ({
         id: t.id, url: t.url, title: t.title, active: t.active,
         windowId: t.windowId, muted: t.mutedInfo?.muted, pinned: t.pinned,
         groupId: t.groupId,
-        managed: interceptorGroupId !== null && t.groupId === interceptorGroupId
+        // managed = default group OR any named group; `group` names the owner.
+        managed: (interceptorGroupId !== null && t.groupId === interceptorGroupId) || namedIds.has(t.groupId),
+        group: labelForGroupId(t.groupId)
       }))
       return { success: true, data: tabData }
+    }
+
+    case "group_list": {
+      if (!chrome.tabGroups || typeof chrome.tabGroups.query !== "function") {
+        return { success: true, data: [] }
+      }
+      await ensureInterceptorGroup()
+      await hydrateNamedGroups()
+      const live = await chrome.tabGroups.query({})
+      // Re-adopt named groups the registry lost (e.g. browser restart restored
+      // the window): exact match on the brand-composed `<brand>-<label>` title.
+      // ponytail: current brand prefix only; a pre-rebrand title is re-adopted on the next brand change
+      const prefix = `${groupTitleFor("")}`
+      for (const g of live) {
+        if (typeof g.title !== "string" || !g.title.startsWith(prefix)) continue
+        const label = g.title.slice(prefix.length)
+        if (GROUP_LABEL_RE.test(label) && labelForGroupId(g.id) === null && g.id !== interceptorGroupId) {
+          await ensureNamedGroup(label)
+        }
+      }
+      const data = await Promise.all(live.map(async g => {
+        const groupTabs = await chrome.tabs.query({ groupId: g.id })
+        return {
+          groupId: g.id,
+          title: g.title,
+          color: g.color,
+          tabCount: groupTabs.length,
+          label: labelForGroupId(g.id),
+          default: interceptorGroupId !== null && g.id === interceptorGroupId,
+          managed: (interceptorGroupId !== null && g.id === interceptorGroupId) || labelForGroupId(g.id) !== null
+        }
+      }))
+      return { success: true, data }
+    }
+
+    case "group_close": {
+      const label = action.label as string | undefined
+      if (!label || !GROUP_LABEL_RE.test(label)) {
+        return { success: false, error: `group_close requires a valid label (got '${label ?? ""}')` }
+      }
+      const groupId = await ensureNamedGroup(label)
+      if (groupId === -1) {
+        return { success: false, error: `group '${label}' not found` }
+      }
+      const groupTabs = await chrome.tabs.query({ groupId })
+      const ids = groupTabs.map(t => t.id).filter((id): id is number => typeof id === "number")
+      // Atomic: ONE tabs.remove over exactly this group's tab ids — the group
+      // object auto-deletes at zero tabs, and the tabGroups.onRemoved listener
+      // purges the registry entry + per-group auto-target. Nothing outside this
+      // id list is touched (issue #124's "3a" isolation guarantee).
+      if (ids.length > 0) await chrome.tabs.remove(ids)
+      return { success: true, data: { label, groupId, closedTabs: ids.length } }
     }
 
     case "tab_duplicate": {

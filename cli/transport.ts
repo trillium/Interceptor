@@ -72,7 +72,28 @@ export type DaemonResponse = {
   result: DaemonResult
 }
 
-export function sendCommand(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+// the per-invocation group scope (--group / $INTERCEPTOR_GROUP), set once
+// by cli/index.ts and injected into every outgoing action here — the single choke
+// point every command path (simple, compound, override, tail loops) funnels
+// through. The group rides INSIDE the action payload because the daemon relays
+// `{id, action, tabId}` verbatim to the extension.
+let globalGroup: string | undefined
+let globalGroupColor: string | undefined
+
+export function setGlobalGroup(group?: string, groupColor?: string): void {
+  globalGroup = group
+  globalGroupColor = groupColor
+}
+
+function withGroup(action: Action): Action {
+  if (!globalGroup || action.group !== undefined) return action
+  const scoped: Action = { ...action, group: globalGroup }
+  if (globalGroupColor && scoped.groupColor === undefined) scoped.groupColor = globalGroupColor
+  return scoped
+}
+
+export function sendCommand(rawAction: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+  const action = withGroup(rawAction)
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -141,7 +162,8 @@ export function sendCommand(action: Action, tabId?: number, contextId?: string):
   })
 }
 
-export function sendCommandWs(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+export function sendCommandWs(rawAction: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+  const action = withGroup(rawAction)
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
