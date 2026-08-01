@@ -172,7 +172,7 @@ Compound (agent-optimized):
   interceptor open <url> --reuse             Navigate the most recent Interceptor-group tab instead of opening a new one (cleans up long automation runs)
   interceptor open <url> --reuse --activate  Navigate the reused tab and bring it to the foreground
   interceptor read                           Tree + text for the designated tab (see 'tab designate'), else the active tab
-                                              (designation persists for the whole session and is not scoped by --group)
+                                              (designation persists for the whole session, scoped per --group)
   interceptor read <ref>                     Tree + text for element subtree
   interceptor read --tree-only               Skip text
   interceptor read --text-only               Skip tree

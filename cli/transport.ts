@@ -85,6 +85,15 @@ export function setGlobalGroup(group?: string, groupColor?: string): void {
   globalGroupColor = groupColor
 }
 
+/**
+ * The `--group` label in effect for this invocation, or `undefined` for the
+ * default group. Set once at startup (cli/index.ts) and read by command
+ * handlers that scope local state — e.g. the designated-tab slot — by group.
+ */
+export function getGlobalGroup(): string | undefined {
+  return globalGroup
+}
+
 function withGroup(action: Action): Action {
   if (!globalGroup || action.group !== undefined) return action
   const scoped: Action = { ...action, group: globalGroup }

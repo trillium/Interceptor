@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseTabsCommand } from "../cli/commands/tabs"
 import { loadDesignatedTab } from "../cli/commands/session-tab"
+import { setGlobalGroup } from "../cli/transport"
 
 // `tab designate <id>` / `tab self` write to and read from ~/.interceptor —
 // point HOME at a scratch dir for the duration of each test so these never
@@ -120,6 +121,35 @@ describe("tab designate / tab self", () => {
     }
     expect(exitCode).toBe(1)
     expect(errors.join("\n")).toContain(`invalid tab id: ${raw}`)
+    expect(loadDesignatedTab()).toBeUndefined()
+  })
+
+  // Two agents driving the CLI under different --group values must each keep
+  // their own designation — the whole point of group scoping.
+  test("tab designate / tab self are scoped per --group across the CLI path", async () => {
+    const logs: string[] = []
+    const origLog = console.log
+    console.log = (msg: string) => logs.push(msg)
+    try {
+      setGlobalGroup("agentA")
+      await parseTabsCommand(["tab", "designate", "111"])
+      setGlobalGroup("agentB")
+      await parseTabsCommand(["tab", "designate", "222"])
+
+      logs.length = 0
+      setGlobalGroup("agentA")
+      await parseTabsCommand(["tab", "self"])
+      setGlobalGroup("agentB")
+      await parseTabsCommand(["tab", "self"])
+    } finally {
+      console.log = origLog
+      setGlobalGroup(undefined)
+    }
+    // agentA still sees 111, agentB still sees 222 — no clobber.
+    expect(logs).toEqual(["111", "222"])
+    expect(loadDesignatedTab("agentA")).toBe(111)
+    expect(loadDesignatedTab("agentB")).toBe(222)
+    // The default slot was never written.
     expect(loadDesignatedTab()).toBeUndefined()
   })
 })

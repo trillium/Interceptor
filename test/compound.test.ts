@@ -15,19 +15,19 @@ describe("resolveReadTargetTabId — read's designated-tab fallback", () => {
 
   test("an explicit --tab wins over any designation", () => {
     home = mkdtempSync(join(tmpdir(), "interceptor-read-fallback-"))
-    saveDesignatedTab(999, home)
-    expect(resolveReadTargetTabId(123, home)).toBe(123)
+    saveDesignatedTab(999, undefined, home)
+    expect(resolveReadTargetTabId(123, undefined, home)).toBe(123)
   })
 
   test("falls back to the designated tab when no --tab is given", () => {
     home = mkdtempSync(join(tmpdir(), "interceptor-read-fallback-"))
-    saveDesignatedTab(592791482, home)
-    expect(resolveReadTargetTabId(undefined, home)).toBe(592791482)
+    saveDesignatedTab(592791482, undefined, home)
+    expect(resolveReadTargetTabId(undefined, undefined, home)).toBe(592791482)
   })
 
   test("resolves to undefined (daemon's active-tab default) when nothing is designated", () => {
     home = mkdtempSync(join(tmpdir(), "interceptor-read-fallback-"))
-    expect(resolveReadTargetTabId(undefined, home)).toBeUndefined()
+    expect(resolveReadTargetTabId(undefined, undefined, home)).toBeUndefined()
   })
 })
 
