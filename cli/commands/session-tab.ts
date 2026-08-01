@@ -17,7 +17,7 @@
  * default slot, preserving the original single-group behavior.
  */
 
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -96,7 +96,19 @@ export function saveDesignatedTab(tabId: number, group?: string, home = resolveH
   try {
     const groups = readState(home)
     groups[groupKey(group)] = tabId
-    writeFileSync(sessionTabPath(home), JSON.stringify({ groups }, null, 2))
+    const stateDir = sessionTabDir(home)
+    const statePath = sessionTabPath(home)
+    const tempPath = join(stateDir, `.session-tab.tmp.${process.pid}`)
+
+    try {
+      writeFileSync(tempPath, JSON.stringify({ groups }, null, 2))
+      renameSync(tempPath, statePath)
+    } catch (writeErr) {
+      try {
+        unlinkSync(tempPath)
+      } catch {}
+      throw writeErr
+    }
   } catch (err) {
     console.error(`error: failed to save designated tab: ${(err as Error).message}`)
     process.exit(1)
