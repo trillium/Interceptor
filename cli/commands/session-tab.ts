@@ -17,7 +17,7 @@
  * default slot, preserving the original single-group behavior.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -76,30 +76,51 @@ function sleepSync(ms: number): void {
 }
 
 /**
+ * Age of the lock directory at `lockPath` in milliseconds, or `undefined` if
+ * it can't be stat'd (e.g. another waiter already reclaimed/released it).
+ */
+function lockAgeMs(lockPath: string): number | undefined {
+  try {
+    return Date.now() - statSync(lockPath).mtimeMs
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Acquire the cross-process lock for `home`, blocking until it's free.
  *
  * `mkdirSync` on an already-existing directory is atomic and throws EEXIST,
  * which is what makes a lock directory (rather than a lock file) a safe
- * mutex across unrelated CLI processes racing on the same state file. A
- * lock that's held past `staleAfterMs` is assumed to belong to a process
- * that crashed mid-write (this CLI is a fresh process per invocation, so
- * nothing ever "comes back" to release it) and is forcibly reclaimed rather
- * than deadlocking every future `tab designate`/`tab self` in that group.
+ * mutex across unrelated CLI processes racing on the same state file. A lock
+ * dir whose own mtime is older than `staleAfterMs` is assumed to belong to a
+ * process that crashed mid-write (this CLI is a fresh process per
+ * invocation, so nothing ever "comes back" to release it) and is forcibly
+ * reclaimed rather than deadlocking every future `tab designate`/`tab self`
+ * in that group.
+ *
+ * Staleness is judged from the lock directory's own mtime, not from how long
+ * this particular waiter has been waiting — a per-waiter deadline would let
+ * two waiters that both wait past `staleAfterMs` each delete a lock the
+ * other just freshly acquired, reintroducing the concurrent-write clobber
+ * this lock exists to prevent. The default of 2s is deliberately tight:
+ * holding the lock only ever spans a few synchronous fs syscalls, so a lock
+ * still standing past that is reliably a crashed holder, not a slow one.
  *
  * Exported purely so tests can hold the lock directly to prove out mutual
  * exclusion deterministically, without depending on OS scheduling luck to
  * make two real writers overlap.
  */
-export function acquireLock(home: string, staleAfterMs = 5000): string {
+export function acquireLock(home: string, staleAfterMs = 2000): string {
   const lockPath = sessionTabLockPath(home)
-  const deadline = Date.now() + staleAfterMs
   while (true) {
     try {
       mkdirSync(lockPath)
       return lockPath
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
-      if (Date.now() >= deadline) {
+      const ageMs = lockAgeMs(lockPath)
+      if (ageMs !== undefined && ageMs >= staleAfterMs) {
         try { rmdirSync(lockPath) } catch {}
         sleepSync(10)
         continue

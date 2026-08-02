@@ -1,8 +1,8 @@
 import { describe, expect, test, afterEach } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { loadDesignatedTab, saveDesignatedTab, clearDesignatedTab } from "../cli/commands/session-tab"
+import { acquireLock, clearDesignatedTab, loadDesignatedTab, releaseLock, saveDesignatedTab } from "../cli/commands/session-tab"
 
 describe("session-tab — designated working tab state", () => {
   let home: string
@@ -169,5 +169,31 @@ describe("session-tab — per-group designation scoping", () => {
     // the contention.
     expect(loadDesignatedTab("agentA", h)).toBe(999)
     expect(loadDesignatedTab("agentB", h)).toBe(222)
+  })
+
+  // Staleness must be judged from the lock directory's own mtime, not from
+  // how long this particular caller has been waiting. A per-waiter deadline
+  // would let a waiter that's been blocked past staleAfterMs reclaim a lock
+  // a different process only just (freshly) acquired, clobbering it. Back-
+  // date a lock dir's mtime directly to simulate a crashed holder, and
+  // confirm acquireLock reclaims only once the lock is actually that old.
+  test("a stale lock is reclaimed based on its own age, not a fixed per-call timeout", () => {
+    const h = freshHome()
+    const lockPath = join(h, ".interceptor")
+    mkdirSync(lockPath, { recursive: true })
+    const staleLock = join(lockPath, "session-tab.lock")
+    mkdirSync(staleLock)
+    const longAgo = new Date(Date.now() - 10_000)
+    utimesSync(staleLock, longAgo, longAgo)
+
+    // staleAfterMs of 100ms: the lock is 10s old, so this must reclaim
+    // immediately rather than waiting out some fixed per-call deadline.
+    const before = Date.now()
+    const reacquired = acquireLock(h, 100)
+    const elapsed = Date.now() - before
+
+    expect(reacquired).toBe(staleLock)
+    expect(elapsed).toBeLessThan(100)
+    releaseLock(reacquired)
   })
 })
