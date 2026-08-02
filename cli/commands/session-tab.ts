@@ -101,6 +101,7 @@ export function acquireLock(home: string, staleAfterMs = 5000): string {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
       if (Date.now() >= deadline) {
         try { rmdirSync(lockPath) } catch {}
+        sleepSync(10)
         continue
       }
       sleepSync(10)
