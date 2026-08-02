@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { loadDesignatedTab, saveDesignatedTab, clearDesignatedTab } from "../cli/commands/session-tab"
@@ -128,6 +128,46 @@ describe("session-tab — per-group designation scoping", () => {
     saveDesignatedTab(222, "agentB", h)
     clearDesignatedTab("agentA", h)
     expect(loadDesignatedTab("agentA", h)).toBeUndefined()
+    expect(loadDesignatedTab("agentB", h)).toBe(222)
+  })
+
+  // The mkdir-based lock in saveDesignatedTab is a cross-process mutex.
+  // Racing two real writer processes and hoping they happen to overlap is a
+  // false-positive risk: on a fast filesystem each read-modify-write can
+  // complete in well under a millisecond, so two independently-scheduled
+  // processes routinely finish without ever actually colliding — a test
+  // built that way can pass even with the lock ripped out. Instead, force a
+  // deterministic overlap: a real second process holds the lock for a fixed
+  // window (via the exported acquireLock/releaseLock — the same primitives
+  // saveDesignatedTab uses), and we assert that a concurrent saveDesignatedTab
+  // call in this process both blocks for that window and loses no data.
+  test("a concurrent designate under a different group blocks for the lock and neither write is lost", async () => {
+    const h = freshHome()
+    saveDesignatedTab(999, "agentA", h)
+
+    const fixture = join(import.meta.dir, "fixtures", "session-tab-lock-holder.ts")
+    const readyPath = join(h, "holder-ready")
+    const holdMs = 300
+    const holder = Bun.spawn(["bun", "run", fixture, h, String(holdMs), readyPath])
+
+    // Wait for the holder to actually have the lock (not a fixed guess at
+    // its startup time) before racing a writer against it.
+    while (!existsSync(readyPath)) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+
+    const before = Date.now()
+    saveDesignatedTab(222, "agentB", h)
+    const elapsed = Date.now() - before
+
+    await holder.exited
+
+    // Proves saveDesignatedTab actually waited on the lock rather than
+    // racing past it — a broken/no-op lock would return almost instantly.
+    expect(elapsed).toBeGreaterThanOrEqual(holdMs - 50)
+    // Neither the pre-existing designation nor the new one was lost across
+    // the contention.
+    expect(loadDesignatedTab("agentA", h)).toBe(999)
     expect(loadDesignatedTab("agentB", h)).toBe(222)
   })
 })

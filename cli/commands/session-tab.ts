@@ -17,7 +17,7 @@
  * default slot, preserving the original single-group behavior.
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -59,6 +59,60 @@ function sessionTabPath(home: string): string {
   return join(sessionTabDir(home), "session-tab.json")
 }
 
+/** Path to the mkdir-based cross-process lock guarding the state file under `home`. */
+function sessionTabLockPath(home: string): string {
+  return join(sessionTabDir(home), "session-tab.lock")
+}
+
+/**
+ * Block the current thread for `ms` milliseconds.
+ *
+ * The lock below guards a synchronous read-modify-write, so waiting for it
+ * to free up must itself be synchronous — Atomics.wait on a scratch buffer
+ * is the standard way to get a blocking sleep without a native binding.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Acquire the cross-process lock for `home`, blocking until it's free.
+ *
+ * `mkdirSync` on an already-existing directory is atomic and throws EEXIST,
+ * which is what makes a lock directory (rather than a lock file) a safe
+ * mutex across unrelated CLI processes racing on the same state file. A
+ * lock that's held past `staleAfterMs` is assumed to belong to a process
+ * that crashed mid-write (this CLI is a fresh process per invocation, so
+ * nothing ever "comes back" to release it) and is forcibly reclaimed rather
+ * than deadlocking every future `tab designate`/`tab self` in that group.
+ *
+ * Exported purely so tests can hold the lock directly to prove out mutual
+ * exclusion deterministically, without depending on OS scheduling luck to
+ * make two real writers overlap.
+ */
+export function acquireLock(home: string, staleAfterMs = 5000): string {
+  const lockPath = sessionTabLockPath(home)
+  const deadline = Date.now() + staleAfterMs
+  while (true) {
+    try {
+      mkdirSync(lockPath)
+      return lockPath
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      if (Date.now() >= deadline) {
+        try { rmdirSync(lockPath) } catch {}
+        continue
+      }
+      sleepSync(10)
+    }
+  }
+}
+
+/** Release a lock acquired by `acquireLock`. Safe to call even if it's already gone. */
+export function releaseLock(lockPath: string): void {
+  try { rmdirSync(lockPath) } catch {}
+}
+
 /**
  * Read the full group→tab map from disk, returning `{}` on any error.
  *
@@ -91,40 +145,61 @@ export function loadDesignatedTab(group?: string, home = resolveHome()): number 
   return typeof tabId === "number" ? tabId : undefined
 }
 
-/** Persist `tabId` as the designated working tab for `group`. */
-export function saveDesignatedTab(tabId: number, group?: string, home = resolveHome()): void {
+/** Atomically replace the state file's contents with `groups` via temp-file + rename. */
+function writeStateAtomic(home: string, groups: Record<string, number>): void {
+  const statePath = sessionTabPath(home)
+  const tempPath = join(sessionTabDir(home), `.session-tab.tmp.${process.pid}`)
   try {
-    const groups = readState(home)
-    groups[groupKey(group)] = tabId
-    const stateDir = sessionTabDir(home)
-    const statePath = sessionTabPath(home)
-    const tempPath = join(stateDir, `.session-tab.tmp.${process.pid}`)
-
+    writeFileSync(tempPath, JSON.stringify({ groups }, null, 2))
+    renameSync(tempPath, statePath)
+  } catch (writeErr) {
     try {
-      writeFileSync(tempPath, JSON.stringify({ groups }, null, 2))
-      renameSync(tempPath, statePath)
-    } catch (writeErr) {
-      try {
-        unlinkSync(tempPath)
-      } catch {}
-      throw writeErr
-    }
-  } catch (err) {
-    console.error(`error: failed to save designated tab: ${(err as Error).message}`)
-    process.exit(1)
+      unlinkSync(tempPath)
+    } catch {}
+    throw writeErr
   }
 }
 
-/** Clear the designated tab for `group`, if one is set. */
-export function clearDesignatedTab(group?: string, home = resolveHome()): void {
+/**
+ * Persist `tabId` as the designated working tab for `group`.
+ *
+ * The read-modify-write against the shared group map is serialized by
+ * `acquireLock`/`releaseLock` — without it, two agents designating under
+ * different groups at the same moment can each read the map before the
+ * other's write lands, and the second write silently drops the first
+ * group's entry.
+ */
+export function saveDesignatedTab(tabId: number, group?: string, home = resolveHome()): void {
+  let lockPath: string | undefined
   try {
+    lockPath = acquireLock(home)
+    const groups = readState(home)
+    groups[groupKey(group)] = tabId
+    writeStateAtomic(home, groups)
+  } catch (err) {
+    if (lockPath) releaseLock(lockPath)
+    console.error(`error: failed to save designated tab: ${(err as Error).message}`)
+    process.exit(1)
+  }
+  if (lockPath) releaseLock(lockPath)
+}
+
+/** Clear the designated tab for `group`, if one is set. Serialized the same way as `saveDesignatedTab`. */
+export function clearDesignatedTab(group?: string, home = resolveHome()): void {
+  let lockPath: string | undefined
+  try {
+    lockPath = acquireLock(home)
     const groups = readState(home)
     if (groups[groupKey(group)] === undefined) return
     delete groups[groupKey(group)]
     if (Object.keys(groups).length === 0) {
-      unlinkSync(sessionTabPath(home))
+      try { unlinkSync(sessionTabPath(home)) } catch {}
     } else {
-      writeFileSync(sessionTabPath(home), JSON.stringify({ groups }, null, 2))
+      writeStateAtomic(home, groups)
     }
-  } catch {}
+  } catch {
+    // best-effort: clearing a designation is not worth surfacing an error for
+  } finally {
+    if (lockPath) releaseLock(lockPath)
+  }
 }
