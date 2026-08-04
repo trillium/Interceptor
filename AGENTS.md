@@ -35,6 +35,17 @@ Operating rules:
 - Prefer passive observation before invasive instrumentation. For network work, start with `inspect` or `net`, not CDP debugger attach. (This rule governs the **browser** surface — driving the user's real Chrome/Brave, where zero-CDP fingerprint matters. The `interceptor macos cdp` surface is CDP-native *by design*: it drives your own Electron/Chromium apps, where there is no anti-bot adversary. See `.agents/skills/interceptor-macos/references/cdp-app.md`.)
 - Do not use `--any-tab` unless the user explicitly authorizes operating outside Interceptor's tracked tab group.
 
+## Tab Continuity
+
+An agent working in the browser can reliably reference "the tab I'm working in" without repeating `--tab <id>` on every command:
+
+1. **Designate once:** `interceptor tab designate <id>` pins a tab as the working tab for the current group
+2. **Continue automatically:** All subsequent commands in the same group target that tab when no explicit `--tab` is provided
+3. **Check current:** `interceptor tab self` prints the designated tab id
+4. **Group-scoped:** Each `--group` value gets its own designated tab, so parallel agents never interfere
+
+The designation survives across separate CLI invocations (it's persisted to `~/.interceptor/session-tab.json`), making it ergonomic for multi-step workflows. When a designated tab exists, commands automatically use it as the default target unless `--tab <other-id>` overrides it explicitly.
+
 ## Background First (Browser + macOS)
 
 The whole product is **background-first by contract.** Both surfaces share the same rule: routine work never moves the user's focus; focus changes only happen on explicitly named opt-in verbs.
