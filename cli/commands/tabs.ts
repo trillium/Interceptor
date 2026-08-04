@@ -6,7 +6,7 @@
 
 import { unlinkSync } from "node:fs"
 import { writeFileSync } from "node:fs"
-import { sendCommand } from "../transport"
+import { getGlobalGroup, sendCommand } from "../transport"
 import { loadDesignatedTab, saveDesignatedTab } from "./session-tab"
 
 type Action = { type: string; [key: string]: unknown }
@@ -164,7 +164,7 @@ async function runTabDesignate(args: string[], jsonMode: boolean, contextId?: st
     tabId = resolved
   }
 
-  saveDesignatedTab(tabId)
+  saveDesignatedTab(tabId, getGlobalGroup())
 
   if (jsonMode) {
     console.log(JSON.stringify({ tab_id: tabId, designated: true }))
@@ -176,7 +176,7 @@ async function runTabDesignate(args: string[], jsonMode: boolean, contextId?: st
 
 /** Handle `interceptor tab self`: print the session's designated tab id, erroring if none is set. */
 function runTabSelf(jsonMode: boolean): null {
-  const tabId = loadDesignatedTab()
+  const tabId = loadDesignatedTab(getGlobalGroup())
   if (tabId === undefined) {
     console.error("error: No tab designated. Run `interceptor tab designate [id]` first.")
     process.exit(1)

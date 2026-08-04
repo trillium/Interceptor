@@ -11,7 +11,7 @@ interceptor open <url> --timeout 15000
 interceptor open <url> --reuse                     # Navigate latest Interceptor-group tab instead of creating
 
 interceptor read                                   # Designated tab (see 'tab designate'), else current page — tree + text
-                                                    # (designation persists for the whole session; not scoped by --group)
+                                                    # (designation persists for the whole session, scoped per --group)
 interceptor read e12 [--tree-only | --text-only]   # Scoped sub-tree
 interceptor read --markdown [--text-only]          # Page text rendered as markdown (preserves headings, **bold**, lists, tables)
 interceptor read --include-style

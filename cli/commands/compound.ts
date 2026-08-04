@@ -6,7 +6,7 @@
  * combines the results into a single output.
  */
 
-import { sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
+import { getGlobalGroup, sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
 import { parseElementTarget } from "../parse"
 import { hasTrustedFlag } from "./flags"
 import { maybeEmitResearchHint } from "./research"
@@ -95,11 +95,16 @@ export function aggregateReadResults(opts: {
  *
  * With no explicit --tab, fall back to the session's designated working tab
  * (see `interceptor tab designate`) rather than whatever tab the browser
- * happens to consider "active" right now. `home` is exposed purely for
- * testing.
+ * happens to consider "active" right now. The fallback is scoped to the
+ * invocation's `--group` so concurrent agents read their own designated tab.
+ * `group` and `home` are exposed purely for testing.
  */
-export function resolveReadTargetTabId(globalTabId?: number, home?: string): number | undefined {
-  return globalTabId ?? loadDesignatedTab(home)
+export function resolveReadTargetTabId(
+  globalTabId?: number,
+  group = getGlobalGroup(),
+  home?: string,
+): number | undefined {
+  return globalTabId ?? loadDesignatedTab(group, home)
 }
 
 type ReadTarget = ReturnType<typeof parseElementTarget> | Record<string, never>
