@@ -16,6 +16,7 @@ import { parseStateCommand } from "./commands/state"
 import { parseActionsCommand } from "./commands/actions"
 import { parseNavigationCommand } from "./commands/navigation"
 import { parseTabsCommand } from "./commands/tabs"
+import { loadDesignatedTab } from "./commands/session-tab"
 import { parseNetworkCommand } from "./commands/network"
 import { parseScreenshotCommand } from "./commands/screenshot"
 import { parseDataCommand } from "./commands/data"
@@ -115,12 +116,21 @@ async function main() {
   // error. Screenshot still honors --no-ws as an escape hatch.
   const useWs = args.includes("--ws") || isSaveCmd || (isScreenshotCmd && !args.includes("--no-ws"))
   const anyTab = args.includes("--any-tab")
-  const globalTabId = parseTabFlag(args)
+  let globalTabId = parseTabFlag(args)
   const globalContextId = parseContextFlag(args)
   // --group / $INTERCEPTOR_GROUP scopes this invocation to a named tab
   // group. Injected into every outgoing action at the transport choke point, so
   // simple, compound, and looping command paths are all covered.
-  setGlobalGroup(parseGroupFlag(args), parseGroupColorFlag(args))
+  const parsedGroup = parseGroupFlag(args)
+  setGlobalGroup(parsedGroup, parseGroupColorFlag(args))
+
+  // If no explicit --tab was provided, fall back to the designated tab for
+  // the current group (if one has been set via `tab designate`). This lets
+  // agents reliably continue working in "their" tab across separate CLI
+  // invocations without threading the id by hand every call.
+  if (globalTabId === undefined) {
+    globalTabId = loadDesignatedTab(parsedGroup)
+  }
 
   // Build filtered args (strip global flags). NB: --json is dual-purpose —
   // it can be a global "emit JSON output" boolean OR a domain-specific
