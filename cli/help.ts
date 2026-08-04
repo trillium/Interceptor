@@ -131,7 +131,7 @@ const MAP_UPGRADE = `macOS + iPhone control are NOT enabled on this browser-only
   interceptor upgrade --full     Add native macOS + iPhone control (macOS host only)`
 
 const MAP_FOOTER = `LOCAL (no browser needed):
-  status · init · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
+  status · init · daemon (manage daemon lifecycle) · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
 
 GLOBAL FLAGS (any command, any position — flag order never changes meaning):
   --json  --context <id>  --tab <id>  --group <label>  --frame <id>  --all-surfaces
@@ -401,6 +401,9 @@ Meta:
   interceptor contexts                       List IDs of all connected browser contexts (use with --context)
   interceptor init                           First-run preflight: verify daemon, bridge, and extension are reachable
   interceptor init --verbose                 Same as 'init', plus a per-component reachability breakdown
+  interceptor daemon                         Gracefully shut down the daemon and clean up runtime files
+  interceptor daemon kill                    Same as above (explicit subcommand)
+  interceptor daemon --json                  Output structured kill result as JSON
   interceptor status                         Check daemon status (local — no connection needed)
   interceptor status --verbose               Daemon + bridge + extension probe with per-component diagnostics
   interceptor status --explain               Alias for --verbose with extra rationale per component
