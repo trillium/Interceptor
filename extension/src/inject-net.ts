@@ -736,6 +736,68 @@ if ((window as any).__interceptor_net_installed) {
     }
   }
 
+  // Page error capture — errors/warnings only, not a console mirror.
+  // console.log/info are deliberately left untouched.
+  function stringifyErrorArg(arg: unknown): string {
+    if (typeof arg === "string") return arg
+    if (arg instanceof Error) return arg.stack || arg.message
+    try { return JSON.stringify(arg) } catch { return String(arg) }
+  }
+
+  const originalConsoleError = console.error.bind(console)
+  console.error = function (...args: unknown[]): void {
+    try {
+      dispatchPageComm({
+        type: "page_error",
+        event: "console_error",
+        level: "error",
+        message: args.map(stringifyErrorArg).join(" ")
+      })
+    } catch {}
+    originalConsoleError(...args)
+  }
+
+  const originalConsoleWarn = console.warn.bind(console)
+  console.warn = function (...args: unknown[]): void {
+    try {
+      dispatchPageComm({
+        type: "page_error",
+        event: "console_warn",
+        level: "warn",
+        message: args.map(stringifyErrorArg).join(" ")
+      })
+    } catch {}
+    originalConsoleWarn(...args)
+  }
+
+  window.addEventListener("error", (ev: ErrorEvent) => {
+    try {
+      dispatchPageComm({
+        type: "page_error",
+        event: "window_error",
+        level: "error",
+        message: ev.message || String(ev.error),
+        source: ev.filename,
+        line: ev.lineno,
+        column: ev.colno,
+        stack: ev.error?.stack
+      })
+    } catch {}
+  })
+
+  window.addEventListener("unhandledrejection", (ev: PromiseRejectionEvent) => {
+    try {
+      const reason = ev.reason
+      dispatchPageComm({
+        type: "page_error",
+        event: "unhandled_rejection",
+        level: "error",
+        message: reason instanceof Error ? (reason.message || String(reason)) : stringifyErrorArg(reason),
+        stack: reason instanceof Error ? reason.stack : undefined
+      })
+    } catch {}
+  })
+
   const OriginalBroadcastChannel = (window as any).BroadcastChannel as typeof BroadcastChannel | undefined
   if (OriginalBroadcastChannel && !(window as any).__interceptor_broadcast_installed) {
     ;(window as any).__interceptor_broadcast_installed = true

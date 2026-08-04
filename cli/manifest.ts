@@ -79,8 +79,8 @@ export const COMMAND_SPECS: CommandSpec[] = [
   {
     name: "inspect", surface: "browser",
     usage: "interceptor inspect [--net-only] [--limit <n>] [--filter <pattern>]",
-    summary: "Tree + text + network log + request headers in one call",
-    returns: "a11y tree, 2,000-char text summary, recent network entries, request headers.",
+    summary: "Tree + text + network log + request headers + page errors in one call",
+    returns: "a11y tree, 2,000-char text summary, recent network entries, request headers, and captured console.error/warn + window error/unhandledrejection entries (a page that throws on load shows up here, not a clean bill of health).",
     example: "interceptor inspect --net-only --filter api",
   },
   // ── reading & finding ───────────────────────────────────────────────────────

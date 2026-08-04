@@ -577,9 +577,14 @@ export async function runInspect(
     { type: "net_headers", filter: filterPattern },
     globalTabId, useWs, contextId
   )
+  const pageErrorsResult = await send(
+    { type: "page_comm_log", entryType: "page_error", filter: filterPattern, limit },
+    globalTabId, useWs, contextId
+  )
 
   const netLogData = textData(netLogResult)
   const netHeadersData = textData(netHeadersResult)
+  const pageErrorsData = textData(pageErrorsResult)
 
   if (jsonMode) {
     output(jsonMode, {
@@ -588,7 +593,8 @@ export async function runInspect(
         tree: treeData || undefined,
         text: textContent || undefined,
         netLog: netLogResult.success ? netLogResult.data : undefined,
-        netHeaders: netHeadersResult.success ? netHeadersResult.data : undefined
+        netHeaders: netHeadersResult.success ? netHeadersResult.data : undefined,
+        pageErrors: pageErrorsResult.success ? pageErrorsResult.data : undefined
       }
     })
     return
@@ -609,6 +615,11 @@ export async function runInspect(
     parts.push("")
     parts.push("--- request headers ---")
     parts.push(netHeadersData)
+  }
+  if (pageErrorsData) {
+    parts.push("")
+    parts.push("--- page errors ---")
+    parts.push(pageErrorsData)
   }
   console.log(parts.join("\n"))
 }
