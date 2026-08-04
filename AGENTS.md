@@ -97,3 +97,10 @@ Deep mechanic notes (the `userActivation` override + `__interceptor_trust` marke
 - Per-task procedures live in `.agents/skills/*/workflows/`. Reference content lives in `.agents/skills/*/references/`. Not here.
 - Update this file when an agent-facing **rule** changes, not when a CLI command is added or renamed (that's a `references/command-catalog.md` change).
 - Conventions for skills, frontmatter, sizes, and names are codified in `.agents/rules/README.md` and enforced in review.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
