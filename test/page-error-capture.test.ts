@@ -3,7 +3,14 @@
 import { describe, expect, test } from "bun:test"
 import { GlobalRegistrator } from "@happy-dom/global-registrator"
 
+// GlobalRegistrator.register() replaces process-wide singletons (WebSocket,
+// Event, etc.) with happy-dom's implementations. Since bun runs every test
+// file in one process, that would otherwise corrupt unrelated tests that talk
+// to a real native WebSocket (cdp-connection.test.ts) — so capture and
+// restore the native WebSocket around registration.
+const nativeWebSocket = globalThis.WebSocket
 try { GlobalRegistrator.register() } catch { /* already registered by an earlier test file */ }
+if (nativeWebSocket) (globalThis as any).WebSocket = nativeWebSocket
 
 ;(globalThis as any).chrome = {
   runtime: {
