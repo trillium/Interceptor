@@ -80,7 +80,10 @@ export function formatMissingDaemonBinaryError(
 
 async function isDaemonHealthyOnWsPort(): Promise<boolean> {
   try {
-    const response = await fetch(`http://127.0.0.1:${WS_PORT}/`, { timeout: 2000 })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 2000)
+    const response = await fetch(`http://127.0.0.1:${WS_PORT}/`, { signal: controller.signal })
+    clearTimeout(timeoutId)
     return response.status === 200
   } catch {
     return false

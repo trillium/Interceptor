@@ -28,7 +28,10 @@ describe("daemon readiness check", () => {
 
     try {
       const port = server.port
-      const response = await fetch(`http://127.0.0.1:${port}/`, { timeout: 2000 })
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 2000)
+      const response = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal })
+      clearTimeout(timeoutId)
       expect(response.status).toBe(200)
       expect(await response.text()).toBe("interceptor daemon")
     } finally {
@@ -39,7 +42,10 @@ describe("daemon readiness check", () => {
   test("reports daemon failure when port is not responsive", async () => {
     // Try to connect to an invalid port
     try {
-      await fetch("http://127.0.0.1:1/", { timeout: 100 })
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 100)
+      await fetch("http://127.0.0.1:1/", { signal: controller.signal })
+      clearTimeout(timeoutId)
     } catch (err) {
       // Expected: fetch throws when port is not listening
       expect(err).toBeDefined()
