@@ -53,14 +53,20 @@ function pickTimeoutForAction(actionType: string): number {
 }
 
 // Branch the timeout hint on `macos_*` so bridge commands don't get a
-// Chrome/Brave-extension troubleshooting hint.
-function timeoutMessage(actionType: string, ms: number): string {
+// Chrome/Brave-extension troubleshooting hint. When the caller scoped the
+// request to a browser context (--context), name it: a registered-but-silent
+// context (browser closed, suspended, or extension reloaded) otherwise
+// misreports as a generic "is Chrome open" problem (robots-m0ay).
+export function timeoutMessage(actionType: string, ms: number, contextId?: string): string {
   const seconds = Math.round(ms / 1000)
   if (actionType.startsWith("macos_")) {
     return `timeout: no response for '${actionType}' after ${seconds}s. The macOS bridge may be waiting on a TCC permission prompt (Microphone / Speech Recognition for listen/vad, Screen Recording for screenshot/capture/vision). Check System Settings → Privacy & Security.`
   }
   if (actionType.startsWith("ios_")) {
     return `timeout: no response for '${actionType}' after ${seconds}s. The InterceptorRunner may be busy with a slow XCUITest snapshot or a non-quiescing app; confirm the device is unlocked and 'interceptor ios status' shows it connected.`
+  }
+  if (contextId) {
+    return `timeout: no response for '${actionType}' after ${seconds}s (context '${contextId}'). The '${contextId}' browser extension is not responding — its browser may be closed or asleep, or the extension was disabled/reloaded. Run 'interceptor diagnose --context ${contextId}' to check, or 'interceptor contexts' to list live contexts.`
   }
   return `timeout: no response for '${actionType}' after ${seconds}s. Ensure Chrome/Brave is open with the Interceptor extension loaded.`
 }
@@ -116,7 +122,7 @@ export function sendCommand(rawAction: Action, tabId?: number, contextId?: strin
       if (!resolved) {
         resolved = true
         if (socketRef) try { socketRef.end() } catch {}
-        reject(new Error(timeoutMessage(action.type, timeoutMs)))
+        reject(new Error(timeoutMessage(action.type, timeoutMs, contextId)))
       }
     }, timeoutMs)
 
@@ -180,7 +186,7 @@ export function sendCommandWs(rawAction: Action, tabId?: number, contextId?: str
 
     const timeoutMs = pickTimeoutForAction(action.type)
     const timer = setTimeout(() => {
-      reject(new Error(`timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
+      reject(new Error(timeoutMessage(action.type, timeoutMs, contextId) + " (via WebSocket)"))
     }, timeoutMs)
 
     const ws = new WebSocket(`ws://localhost:${WS_PORT}`)

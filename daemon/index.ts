@@ -1373,7 +1373,13 @@ try {
             setTimeout(() => timedOutRequests.delete(id), 60_000)
             log(`request timeout: ${id}`)
             emitEvent("request_timeout", { requestId: id, action: actionType })
-            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: "timeout" } }))
+            // Name the action and context so a stale/foreign timeout that
+            // outlives the CLI's own deadline still identifies the real
+            // missing piece (robots-m0ay: registered-but-silent context).
+            const timeoutDetail = request.contextId
+              ? `timeout waiting for extension reply to '${actionType}' (context '${request.contextId}'). Run 'interceptor diagnose --context ${request.contextId}' to check that browser's extension.`
+              : `timeout waiting for extension reply to '${actionType}'`
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: timeoutDetail } }))
           }, requestTimeoutForAction(actionType))
           pendingRequests.set(id, {
             resolve: (response: string) => {
@@ -1595,7 +1601,10 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           timedOutRequests.add(id)
           setTimeout(() => timedOutRequests.delete(id), 60_000)
           log(`ws request timeout: ${id}`)
-          ws.send(JSON.stringify({ id, result: { success: false, error: "timeout" } }))
+          const wsTimeoutDetail = request.contextId
+            ? `timeout waiting for extension reply to '${actionType}' (context '${request.contextId}'). Run 'interceptor diagnose --context ${request.contextId}' to check that browser's extension.`
+            : `timeout waiting for extension reply to '${actionType}'`
+          ws.send(JSON.stringify({ id, result: { success: false, error: wsTimeoutDetail } }))
         }, requestTimeoutForAction(actionType))
 
         pendingRequests.set(id, {

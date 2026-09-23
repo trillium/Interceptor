@@ -31,6 +31,17 @@ function parseIntegerArg(label: string, raw: string | undefined): number {
   return value
 }
 
+/**
+ * Resolve the top-level tab id for an outgoing action. An explicit numeric
+ * target inside the action itself (e.g. `tab close <id>`, `tab switch <id>`)
+ * wins over the designated-tab fallback: attaching a stale designated id
+ * alongside it poisons the extension's group gate — a designated tab that has
+ * since been closed made the gated action hang with no reply (robots-m0ay).
+ */
+export function resolveEffectiveTabId(action: Action, designatedTabId: number | undefined): number | undefined {
+  return typeof action.tabId === "number" ? action.tabId : designatedTabId
+}
+
 function parsePositiveIntegerArg(label: string, raw: string | undefined): number {
   const value = parseIntegerArg(label, raw)
   if (value <= 0) {

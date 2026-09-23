@@ -15,7 +15,7 @@ import { ensureDaemon } from "./daemon-spawn"
 import { parseStateCommand } from "./commands/state"
 import { parseActionsCommand } from "./commands/actions"
 import { parseNavigationCommand } from "./commands/navigation"
-import { parseTabsCommand } from "./commands/tabs"
+import { parseTabsCommand, resolveEffectiveTabId } from "./commands/tabs"
 import { loadDesignatedTab } from "./commands/session-tab"
 import { parseNetworkCommand } from "./commands/network"
 import { parseScreenshotCommand } from "./commands/screenshot"
@@ -429,8 +429,8 @@ async function main() {
 
   try {
     const response = useWs
-      ? await sendCommandWs(action, globalTabId, globalContextId)
-      : await sendCommand(action, globalTabId, globalContextId)
+      ? await sendCommandWs(action, resolveEffectiveTabId(action, globalTabId), globalContextId)
+      : await sendCommand(action, resolveEffectiveTabId(action, globalTabId), globalContextId)
     const result = unwrapResult(response)
     if (pendingMonitorTaskId) {
       if (result.success) {
