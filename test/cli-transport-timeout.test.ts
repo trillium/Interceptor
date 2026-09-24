@@ -25,6 +25,21 @@ describe("cli transport timeoutMessage", () => {
     expect(timeoutMessage("macos_screenshot", 15000, "stable")).toContain("macOS bridge")
     expect(timeoutMessage("ios_tree", 60000, "stable")).toContain("InterceptorRunner")
   })
+
+  test("cdp/app contexts name the endpoint, not the browser extension", () => {
+    for (const ctx of ["cdp:Slack", "app:Slack"]) {
+      const msg = timeoutMessage("read", 15000, ctx)
+      expect(msg).toContain(ctx)
+      expect(msg).toContain("endpoint")
+      expect(msg).not.toContain("browser extension")
+    }
+  })
+
+  test("ios contexts name the runner, not the browser extension", () => {
+    const msg = timeoutMessage("read", 15000, "ios:00008110-0000000000000000")
+    expect(msg).toContain("InterceptorRunner")
+    expect(msg).not.toContain("browser extension")
+  })
 })
 
 describe("resolveEffectiveTabId", () => {
@@ -36,5 +51,11 @@ describe("resolveEffectiveTabId", () => {
   test("falls back to designated when the action carries no target", () => {
     expect(resolveEffectiveTabId({ type: "tab_close" }, 222)).toBe(222)
     expect(resolveEffectiveTabId({ type: "tab_list" }, undefined)).toBeUndefined()
+  })
+
+  test("non-integer targets fall back to designated", () => {
+    expect(resolveEffectiveTabId({ type: "tab_switch", tabId: NaN }, 222)).toBe(222)
+    expect(resolveEffectiveTabId({ type: "tab_close", tabId: parseInt("abc") }, 222)).toBe(222)
+    expect(resolveEffectiveTabId({ type: "tab_switch", tabId: NaN }, undefined)).toBeUndefined()
   })
 })

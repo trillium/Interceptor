@@ -39,7 +39,7 @@ function parseIntegerArg(label: string, raw: string | undefined): number {
  * since been closed made the gated action hang with no reply (robots-m0ay).
  */
 export function resolveEffectiveTabId(action: Action, designatedTabId: number | undefined): number | undefined {
-  return typeof action.tabId === "number" ? action.tabId : designatedTabId
+  return typeof action.tabId === "number" && Number.isInteger(action.tabId) ? action.tabId : designatedTabId
 }
 
 function parsePositiveIntegerArg(label: string, raw: string | undefined): number {

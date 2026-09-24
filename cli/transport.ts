@@ -66,6 +66,12 @@ export function timeoutMessage(actionType: string, ms: number, contextId?: strin
     return `timeout: no response for '${actionType}' after ${seconds}s. The InterceptorRunner may be busy with a slow XCUITest snapshot or a non-quiescing app; confirm the device is unlocked and 'interceptor ios status' shows it connected.`
   }
   if (contextId) {
+    if (contextId.startsWith("cdp:") || contextId.startsWith("app:")) {
+      return `timeout: no response for '${actionType}' after ${seconds}s (context '${contextId}'). The '${contextId}' endpoint is not responding — its app may have quit or its debugger connection dropped. Run 'interceptor diagnose --context ${contextId}' to check, or 'interceptor contexts' to list live contexts.`
+    }
+    if (contextId.startsWith("ios:")) {
+      return `timeout: no response for '${actionType}' after ${seconds}s (context '${contextId}'). The InterceptorRunner may be busy with a slow XCUITest snapshot or a non-quiescing app; confirm the device is unlocked and 'interceptor ios status' shows it connected.`
+    }
     return `timeout: no response for '${actionType}' after ${seconds}s (context '${contextId}'). The '${contextId}' browser extension is not responding — its browser may be closed or asleep, or the extension was disabled/reloaded. Run 'interceptor diagnose --context ${contextId}' to check, or 'interceptor contexts' to list live contexts.`
   }
   return `timeout: no response for '${actionType}' after ${seconds}s. Ensure Chrome/Brave is open with the Interceptor extension loaded.`

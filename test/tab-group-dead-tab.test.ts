@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach } from "bun:test"
 import {
+  groupTitleFor,
   isTabInAnyManagedGroup,
   isTabInNamedGroup,
 } from "../extension/src/background/tab-group"
@@ -30,6 +31,8 @@ describe("tab-group dead-tab membership", () => {
   })
 
   test("isTabInNamedGroup returns false (not throws) for a gone tab", async () => {
+    const chrome = (globalThis as Record<string, any>).chrome
+    chrome.tabGroups.query = async () => [{ title: groupTitleFor("dead-tab-probe"), id: 42 }]
     await expect(isTabInNamedGroup(999, "dead-tab-probe")).resolves.toBe(false)
   })
 
