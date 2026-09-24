@@ -138,14 +138,28 @@ export async function isTabInNamedGroup(tabId: number, label: string): Promise<b
   if (!hasTabGroupApi()) return true
   const groupId = await ensureNamedGroup(label)
   if (groupId === -1) return false
-  const tab = await chrome.tabs.get(tabId)
+  // A designated/stored tab that no longer exists (chrome.tabs.get rejects)
+  // is simply not a member — return false so the caller fails fast with a
+  // named error instead of hanging with no reply (robots-m0ay).
+  let tab: chrome.tabs.Tab
+  try {
+    tab = await chrome.tabs.get(tabId)
+  } catch {
+    return false
+  }
   return tab.groupId === groupId
 }
 
 /** Membership in the default brand group OR any registered named group. */
 export async function isTabInAnyManagedGroup(tabId: number): Promise<boolean> {
   if (!hasTabGroupApi()) return true
-  const tab = await chrome.tabs.get(tabId)
+  // Same dead-tab rule as isTabInNamedGroup: a gone tab is not a member.
+  let tab: chrome.tabs.Tab
+  try {
+    tab = await chrome.tabs.get(tabId)
+  } catch {
+    return false
+  }
   if (interceptorGroupId === null) await ensureInterceptorGroup()
   if (interceptorGroupId !== null && tab.groupId === interceptorGroupId) return true
   await hydrateNamedGroups()
