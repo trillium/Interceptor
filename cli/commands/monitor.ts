@@ -33,7 +33,12 @@ import {
   repairMonitorTask,
   synthesizeMonitorTaskTranscript,
   validateMonitorTaskMode,
+  createMonitorTask,
+  checkpointMonitorTask,
+  resumeMonitorTask,
+  verifyMonitorTask,
 } from "../../shared/monitor-tasks"
+import { sendCommand, sendCommandWs } from "../transport"
 import { fromMonitorEvents, writeExport } from "../../shared/exports"
 import { VERSION } from "../version"
 
@@ -524,6 +529,17 @@ export function buildPlan(sid: string, includeSynthetic = false, includeBodies =
   const hasRealUserEvents = events.some((e) => e.tr !== false && actionKinds.has(e.event || ""))
   const emitSynthetic = includeSynthetic || !hasRealUserEvents
 
+  // Commands emitted after a recorded focus switch target that tab with --tab
+  // until a child-tab handoff (`tab new` makes the new tab the auto-target).
+  let replayTab: { tid: number; from: number } | undefined
+  const closeReplayTab = (): void => {
+    if (!replayTab) return
+    for (let j = replayTab.from; j < lines.length; j++) {
+      if (lines[j].startsWith("interceptor ") && !lines[j].startsWith("interceptor tab new")) lines[j] += ` --tab ${replayTab.tid}`
+    }
+    replayTab = undefined
+  }
+
   type IndexedEvent = { ev: MonEvent; idx: number }
   const evList: IndexedEvent[] = events.map((ev, idx) => ({ ev, idx }))
 
@@ -622,13 +638,18 @@ export function buildPlan(sid: string, includeSynthetic = false, includeBodies =
       }
       case "mon_attach": {
         if (ev.reason === "child_tab" && ev.u) {
+          closeReplayTab()
           lines.push(`# handoff to child tab ${ev.tid || "?"}`)
           lines.push(`interceptor tab new "${escapeArg(ev.u)}"`)
           lines.push(`interceptor wait-stable`)
         } else if (ev.reason === "focus_switch" && ev.tid) {
-          lines.push(`# focus-switch to tab ${ev.tid}${ev.u ? ` (${ev.u})` : ""}`)
-          lines.push(`interceptor tab switch ${ev.tid}`)
-          lines.push(`interceptor wait-stable`)
+          // A recorded focus switch is where the person looked, not a step the
+          // replay reproduces: a replayed `tab switch` would take over the
+          // user's view, so the commands that follow carry --tab instead.
+          // Foregrounding stays a deliberate choice for a trusted click.
+          closeReplayTab()
+          lines.push(`# focus-switch to tab ${ev.tid}${ev.u ? ` (${ev.u})` : ""}: the commands below target it with --tab; foreground only for a trusted click, then switch back`)
+          replayTab = { tid: ev.tid, from: lines.length }
         }
         break
       }
@@ -654,6 +675,7 @@ export function buildPlan(sid: string, includeSynthetic = false, includeBodies =
     }
   }
 
+  closeReplayTab()
   return lines.join("\n")
 }
 
@@ -662,7 +684,7 @@ function withBodies(planText: string, sid: string): string {
   return planText.replace(/^# interceptor net log /gm, "interceptor net log ")
 }
 
-export async function parseMonitorCommand(filtered: string[], jsonMode = false): Promise<Action | null> {
+export async function parseMonitorCommand(filtered: string[], jsonMode = false, useWs = false): Promise<Action | null> {
   const sub = filtered[1]
   if (!sub || sub === "help") {
     console.log(MONITOR_HELP)
@@ -774,6 +796,38 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
 
     case "task": {
       const op = filtered[2]
+      if (["create", "checkpoint", "resume", "verify", "complete"].includes(op)) {
+        try {
+          const ref = filtered[3]
+          if (!ref || ref.startsWith("--")) throw new Error(`monitor task ${op} requires ${op === "create" ? "a quoted objective" : "a task id or name"}`)
+          let result: unknown
+          if (op === "create") {
+            result = createMonitorTask({ instruction: ref, mode: "agent-record" })
+          } else {
+            const taskId = resolveMonitorTaskId(ref)
+            if (op === "checkpoint") {
+              const file = flagValue(filtered, "--file")
+              if (!file) throw new Error("checkpoint requires --file <checkpoint.json>")
+              checkpointMonitorTask(taskId, JSON.parse(readFileSync(file, "utf8")))
+            } else if (op === "verify" || op === "complete") {
+              const send = useWs ? sendCommandWs : sendCommand
+              const task = await verifyMonitorTask(taskId, async (target, code) => {
+                const response = await send({ type: "evaluate", code, world: "MAIN", noCspReload: true, group: target.group, groupSoft: false, frameId: target.frameId }, target.tabId, target.contextId)
+                return response.result
+              }, op === "complete")
+              if (!task.verification?.passed) process.exitCode = 1
+            }
+            result = resumeMonitorTask(taskId)
+          }
+          console.log(JSON.stringify(result, null, 2))
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          if (jsonMode) console.log(JSON.stringify({ success: false, error }))
+          else console.error(`error: ${error}`)
+          process.exitCode = 1
+        }
+        return null
+      }
       if (op === "repair") {
         const taskId = filtered[3]
         if (!taskId) {
@@ -808,12 +862,15 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
         }
       }
       if (op === "snapshot") {
-        const taskId = filtered[3]
-        if (!taskId) {
-          console.error("error: interceptor monitor task snapshot requires <taskId>")
+        const taskRef = filtered[3]
+        if (!taskRef) {
+          console.error("error: interceptor monitor task snapshot requires <taskId|name>")
           process.exit(1)
         }
         try {
+          // accept the task's name (instruction) as well as its id — the id is
+          // generated, the name is what the user typed at start (#218).
+          const taskId = resolveMonitorTaskId(taskRef)
           const manifest = snapshotMonitorTaskSources(taskId)
           if (jsonMode) console.log(JSON.stringify(manifest, null, 2))
           else console.log(`snapshotted ${manifest.filter((entry) => entry.status === "present").length} source artifacts for task ${taskId}`)
@@ -824,12 +881,29 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
         }
       }
       if (op === "quality" || op === "diagnose") {
-        const taskId = filtered[3]
-        if (!taskId) {
-          console.error(`error: interceptor monitor task ${op} requires <taskId>`)
+        const taskRef = filtered[3]
+        if (!taskRef) {
+          console.error(`error: interceptor monitor task ${op} requires <taskId|name>`)
           process.exit(1)
         }
         try {
+          const taskId = resolveMonitorTaskId(taskRef)
+          // quality only READS the transcript/segments files; without this,
+          // grading a task whose synthesis never ran (e.g. stopped via
+          // `stop --sid`, which skips the task epilogue) reported
+          // "transcript segments: 0" no matter what the sources hold (#218).
+          if (readMonitorTaskTranscriptSegments(taskId).length === 0) {
+            const meta = readMonitorTaskMeta(taskId)
+            if (meta && meta.sourceSessions.length > 0) {
+              try {
+                synthesizeMonitorTaskTranscript(taskId)
+                const segmentCount = readMonitorTaskTranscriptSegments(taskId).length
+                console.error(`synthesized transcript (${segmentCount} segments) — quality reflects current sources`)
+              } catch {
+                // fall through to plain grading; the report's findings explain what's missing
+              }
+            }
+          }
           const report = generateMonitorTaskCaptureQuality(taskId)
           if (jsonMode) console.log(JSON.stringify(report, null, 2))
           else console.log(renderMonitorTaskQualitySummary(taskId))
@@ -863,7 +937,7 @@ export async function parseMonitorCommand(filtered: string[], jsonMode = false):
           process.exit(1)
         }
       }
-      console.error("error: unknown monitor task subcommand. Try: attach, snapshot, repair, quality, diagnose, compile-blueprint")
+      console.error("error: unknown monitor task subcommand. Try: create, checkpoint, resume, verify, complete, attach, snapshot, repair, quality, diagnose, compile-blueprint")
       process.exit(1)
     }
 
@@ -1055,6 +1129,11 @@ Usage:
   interceptor monitor task repair <taskId>
   interceptor monitor task quality <taskId>
   interceptor monitor task compile-blueprint <taskId> [--force-diagnostic]
+  interceptor monitor task create "<objective>"
+  interceptor monitor task checkpoint <taskId> --file <checkpoint.json>
+  interceptor monitor task resume <taskId>
+  interceptor monitor task verify <taskId>
+  interceptor monitor task complete <taskId>
   interceptor monitor tail [--session <sid>] [--raw]
   interceptor monitor list
   interceptor monitor export <sessionId> [--format text|json|har|pcapng|plan] [--out <path>] [--json|--plan] [--with-bodies]
@@ -1068,7 +1147,9 @@ status   Show active sessions and counts, or a task envelope when --task is pres
 pause    Pause emission temporarily (does not unhook listeners).
 resume   Resume emission.
 repair   Recover unattached sessions for a task, snapshot sources, transcribe offline audio, regenerate timeline/transcript, and re-grade.
-task     Manage task-scoped source membership.
+task     Manage task-scoped source membership and durable agent task state.
+         create makes a task with no recording; checkpoint saves revisioned constraints, target, checks and lessons;
+         resume returns compact state with scoped lessons; verify runs the stored checks now; complete requires every check to return true.
          snapshot copies source evidence under the task root; quality renders readiness gates; compile-blueprint enforces them.
 tail     Live tail of recorded events. Pretty by default; --raw for JSONL.
 list     List all sessions historically present in the event log.

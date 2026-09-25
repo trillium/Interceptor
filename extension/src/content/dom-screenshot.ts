@@ -18,6 +18,7 @@
 // "*" and can be embedded as data URLs without tainting the canvas.
 
 import { resolveElement } from "./input-simulation"
+import { queryOneDeep } from "./deep-query"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown }
 
@@ -163,7 +164,14 @@ function buildStyledClone(src: Node, collect: CloneCollect): Node | null {
 
 async function nativeRenderToDataUrl(
   node: HTMLElement,
-  o: { width: number; height: number; pixelRatio: number; format: "png" | "jpeg"; quality: number; isFull: boolean }
+  o: {
+    width: number; height: number; pixelRatio: number; format: "png" | "jpeg"; quality: number; isFull: boolean
+    // Region crop in CSS px, applied at rasterize time: the canvas is
+    // allocated at the crop size and the decoded SVG is drawn offset into it.
+    // Decoding a huge SVG image succeeds where allocating a full-page canvas
+    // fails, so --region works on pages far past the canvas size limit.
+    crop?: { x: number; y: number; width: number; height: number }
+  }
 ): Promise<string> {
   const collect: CloneCollect = { imgJobs: [], bgJobs: [], urls: new Set() }
   const clone = buildStyledClone(node, collect) as HTMLElement | null
@@ -208,47 +216,38 @@ async function nativeRenderToDataUrl(
 
   const img = await loadSvgImage(svgUrl)
   const canvas = document.createElement("canvas")
-  canvas.width = Math.max(1, Math.round(o.width * o.pixelRatio))
-  canvas.height = Math.max(1, Math.round(o.height * o.pixelRatio))
+  const fullW = Math.max(1, Math.round(o.width * o.pixelRatio))
+  const fullH = Math.max(1, Math.round(o.height * o.pixelRatio))
+  canvas.width = o.crop ? Math.max(1, Math.round(o.crop.width * o.pixelRatio)) : fullW
+  canvas.height = o.crop ? Math.max(1, Math.round(o.crop.height * o.pixelRatio)) : fullH
   const ctx = canvas.getContext("2d")
   if (!ctx) throw new Error("2d canvas context unavailable")
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-  return o.format === "jpeg" ? canvas.toDataURL("image/jpeg", o.quality) : canvas.toDataURL("image/png")
+  if (o.crop) {
+    // Draw the full decoded image scaled to full size but offset so only the
+    // crop rect lands on the (crop-sized) canvas.
+    ctx.drawImage(img, -Math.round(o.crop.x * o.pixelRatio), -Math.round(o.crop.y * o.pixelRatio), fullW, fullH)
+  } else {
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+  }
+  const out = o.format === "jpeg" ? canvas.toDataURL("image/jpeg", o.quality) : canvas.toDataURL("image/png")
+  return checkRasterizeOutput(out, canvas.width, canvas.height)
 }
 
-async function cropDataUrl(
-  dataUrl: string,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  format: "png" | "jpeg",
-  quality: number
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    const img = new Image()
-    img.onload = () => {
-      try {
-        const canvas = document.createElement("canvas")
-        canvas.width = w
-        canvas.height = h
-        const ctx = canvas.getContext("2d")
-        if (!ctx) { resolve(null); return }
-        ctx.drawImage(img, x, y, w, h, 0, 0, w, h)
-        const out = format === "jpeg"
-          ? canvas.toDataURL("image/jpeg", quality)
-          : canvas.toDataURL("image/png")
-        resolve(out)
-      } catch {
-        resolve(null)
-      }
-    }
-    img.onerror = () => resolve(null)
-    img.src = dataUrl
-  })
+// A canvas past the browser's max dimension/area limits doesn't throw — the
+// backing store silently fails to allocate and toDataURL() returns "data:,"
+// (or a near-empty payload). Without this guard the pipeline reports
+// success with size: 0, which downstream consumers can't distinguish from a
+// real capture. Turn it into an actionable error instead.
+export function checkRasterizeOutput(dataUrl: string, width: number, height: number): string {
+  const payloadStart = dataUrl.indexOf(",") + 1
+  if (payloadStart > 0 && dataUrl.length - payloadStart >= 24) return dataUrl
+  throw new Error(
+    `rendered canvas ${width}x${height}px exceeds the browser's canvas size limit and produced no image data — ` +
+    `capture a smaller area with --region, or reduce output size with --target-max-long-edge or a smaller --scale`
+  )
 }
 
-function resolveTarget(action: DomScreenshotAction): { node: HTMLElement | null; error?: string } {
+export function resolveTarget(action: DomScreenshotAction): { node: HTMLElement | null; error?: string } {
   const mode = action.mode || "full"
   switch (mode) {
     case "full":
@@ -272,7 +271,7 @@ function resolveTarget(action: DomScreenshotAction): { node: HTMLElement | null;
       if (!action.selector) {
         return { node: null, error: "selector mode requires selector string" }
       }
-      const el = document.querySelector(action.selector)
+      const el = queryOneDeep(action.selector)
       if (!el) return { node: null, error: `selector not found: ${action.selector}` }
       if (!(el instanceof HTMLElement)) {
         return { node: null, error: `selector matched non-HTMLElement (got ${el.constructor.name})` }
@@ -324,37 +323,40 @@ export async function handleDomScreenshot(action: DomScreenshotAction): Promise<
   }
 
   try {
-    let dataUrl = await nativeRenderToDataUrl(node, {
-      width, height, pixelRatio, format, quality: qualityPct / 100, isFull
+    // Region mode crops at rasterize time (crop-sized canvas, offset draw),
+    // which keeps inter-frame / SW→daemon messages small AND works on pages
+    // whose full-size canvas would exceed the browser's canvas limits.
+    const crop = mode === "region" && action.region ? action.region : undefined
+    const dataUrl = await nativeRenderToDataUrl(node, {
+      width, height, pixelRatio, format, quality: qualityPct / 100, isFull, crop
     })
-    let outWidth = Math.round(width * pixelRatio)
-    let outHeight = Math.round(height * pixelRatio)
-
-    // Region mode: crop here in the content script before sending the dataUrl
-    // back, so the inter-frame / SW→daemon messages stay small.
-    if (mode === "region" && action.region) {
-      const region = action.region
-      const cropped = await cropDataUrl(
-        dataUrl,
-        Math.round(region.x * pixelRatio),
-        Math.round(region.y * pixelRatio),
-        Math.round(region.width * pixelRatio),
-        Math.round(region.height * pixelRatio),
-        format,
-        qualityPct / 100
-      )
-      if (cropped) {
-        dataUrl = cropped
-        outWidth = Math.round(region.width * pixelRatio)
-        outHeight = Math.round(region.height * pixelRatio)
-      }
-    }
+    const outWidth = Math.round((crop ? crop.width : width) * pixelRatio)
+    const outHeight = Math.round((crop ? crop.height : height) * pixelRatio)
 
     return {
       success: true,
       data: { dataUrl, format, width: outWidth, height: outHeight, pixelRatio, mode }
     }
   } catch (err) {
-    return { success: false, error: `dom render failed: ${(err as Error).message}` }
+    return { success: false, error: `dom render failed: ${describeRenderError(err)}` }
   }
+}
+
+// html-to-image can reject with a raw `error` DOM Event (an <img>/SVG onerror)
+// when the serialized-and-resource-embedded SVG fails to load/decode on a heavy
+// real page. A DOM Event has no `.message`, so `(err as Error).message` renders
+// the useless literal "undefined". Coerce every error shape into a meaningful,
+// non-"undefined" string, sanitizing AFTER coercion so a thrown literal
+// "undefined"/"null"/"" or "[object Object]" can never leak.
+export function describeRenderError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof Event !== "undefined" && err instanceof Event) {
+    const target = err.target as { src?: string; tagName?: string } | null
+    return `image load failed (${err.type}${target?.tagName ? ` on <${target.tagName.toLowerCase()}>` : ""}) — the rendered SVG could not be decoded, likely too large or a resource blocked`
+  }
+  const s = typeof err === "string" ? err : String(err)
+  if (!s || s === "undefined" || s === "null" || s === "[object Object]") {
+    return "unknown render error (non-Error thrown)"
+  }
+  return s
 }

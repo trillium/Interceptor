@@ -24,11 +24,22 @@ import { handleMetaActions } from "./capabilities/meta"
 import { handlePassiveNetActions, restorePageCommCaptureConfig } from "./capabilities/passive-net"
 import { handleCdpNetworkActions } from "./capabilities/cdp-network-actions"
 import { handleMonitorActions, registerMonitorListeners } from "./capabilities/monitor"
+import { handlePowerIdleActions } from "./keepawake"
+import { registerKeepaliveListeners } from "./tab-keepalive"
 
-registerMonitorListeners()
-restorePageCommCaptureConfig()
+// Keep this module import-safe. `transport.ts` imports the message dispatcher,
+// which imports this router, so any top-level browser API call here runs before
+// an entrypoint can select its browser-specific transport and capabilities.
+// Safari treats an exception during that phase as a background-content load
+// failure and never reaches the daemon. Each entrypoint calls this explicitly
+// after it has configured its own runtime.
+export function initializeActionRouter(): void {
+  registerMonitorListeners()
+  restorePageCommCaptureConfig()
+  registerKeepaliveListeners()
+}
 
-type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
+type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number; warning?: string }
 
 const OS_INPUT_ACTIONS = new Set(["os_click", "os_key", "os_type", "os_move"])
 const SCREENSHOT_ACTIONS = new Set(["screenshot", "screenshot_background", "page_capture", "ocr"])
@@ -44,7 +55,7 @@ const CANVAS_ACTIONS = new Set([
   "canvas_ocr"
 ])
 const TAB_ACTIONS = new Set([
-  "tab_create", "tab_close", "tab_switch", "tab_list", "tab_duplicate",
+  "tab_create", "tab_close", "tab_switch", "tab_keepalive", "tab_list", "tab_duplicate",
   "tab_reload", "tab_mute", "tab_pin", "tab_zoom_get", "tab_zoom_set",
   "tab_group", "tab_ungroup", "tab_move", "tab_discard",
   "group_list", "group_close"
@@ -65,13 +76,14 @@ const DOWNLOAD_ACTIONS = new Set([
 ])
 const SESSION_ACTIONS = new Set(["session_list", "session_restore"])
 const NOTIFICATION_ACTIONS = new Set(["notification_create", "notification_clear"])
+const SEARCH_ACTIONS = new Set(["search_capability", "search_query"])
 const BROWSING_DATA_ACTIONS = new Set(["browsing_data_remove"])
 const HEADER_ACTIONS = new Set(["headers_modify"])
 const EVALUATE_ACTIONS = new Set(["evaluate"])
 const BINARY_SINK_ACTIONS = new Set(["binary_sink_save"])
 const STYLE_ACTIONS = new Set(["style_inject", "style_remove"])
-const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"])
-const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group"])
+const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree", "frames_find"])
+const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group", "context_set"])
 const PASSIVE_NET_ACTIONS = new Set([
   "net_log", "net_clear", "net_headers", "sse_log", "sse_streams", "sse_chunk",
   "set_net_overrides", "clear_net_overrides",
@@ -79,6 +91,7 @@ const PASSIVE_NET_ACTIONS = new Set([
 ])
 const CDP_NETWORK_ACTIONS = new Set(["network_intercept", "network_log", "network_override"])
 const MONITOR_ACTIONS = new Set(["monitor_start", "monitor_stop", "monitor_status", "monitor_pause", "monitor_resume"])
+const POWER_IDLE_ACTIONS = new Set(["keepawake", "idle_state"])
 const SCENE_ACTIONS = new Set([
   "scene_list", "scene_click", "scene_dblclick", "scene_select", "scene_hit",
   "scene_selected", "scene_text", "scene_insert", "scene_cursor_to", "scene_cursor",
@@ -103,7 +116,7 @@ export async function routeAction(
   if (DOWNLOAD_ACTIONS.has(action.type)) return handleDownloadActions(action, tabId)
   if (SESSION_ACTIONS.has(action.type)) return handleSessionActions(action, tabId)
   if (NOTIFICATION_ACTIONS.has(action.type)) return handleNotificationActions(action, tabId)
-  if (action.type === "search_query") return handleSearchActions(action, tabId)
+  if (SEARCH_ACTIONS.has(action.type)) return handleSearchActions(action, tabId)
   if (BROWSING_DATA_ACTIONS.has(action.type)) return handleBrowsingDataActions(action, tabId)
   if (HEADER_ACTIONS.has(action.type)) return handleHeaderActions(action, tabId)
   if (EVALUATE_ACTIONS.has(action.type)) return handleEvaluateActions(action, tabId)
@@ -114,11 +127,12 @@ export async function routeAction(
   if (PASSIVE_NET_ACTIONS.has(action.type)) return handlePassiveNetActions(action, tabId)
   if (CDP_NETWORK_ACTIONS.has(action.type)) return handleCdpNetworkActions(action, tabId)
   if (MONITOR_ACTIONS.has(action.type)) return handleMonitorActions(action, tabId)
+  if (POWER_IDLE_ACTIONS.has(action.type)) return handlePowerIdleActions(action)
 
   // Default: forward to content script
   const contentResult = await sendToContentScript(
     tabId, action, action.frameId as number | undefined
-  ) as { success: boolean; error?: string; data?: unknown; warning?: string }
+  ) as { success: boolean; error?: string; data?: unknown; warning?: string; refId?: string }
 
   const shouldSceneEscalate =
     action.type === "scene_click" &&
@@ -126,8 +140,11 @@ export async function routeAction(
     ((action.os === true) || contentResult.warning?.includes("no DOM change")) &&
     activeTransport !== "none"
 
+  // click_selector escalates through the same path: the content handler
+  // reports the clicked element's refId, which os_click resolves to screen
+  // coordinates exactly like a ref-targeted click.
   const shouldClickEscalate =
-    action.type === "click" &&
+    (action.type === "click" || action.type === "click_selector") &&
     contentResult.success &&
     contentResult.warning?.includes("no DOM change") &&
     activeTransport !== "none"
@@ -140,6 +157,7 @@ export async function routeAction(
     const osResult = await handleOsInputActions({
       ...action,
       type: "os_click",
+      ref: contentResult.refId ?? action.ref,
       x: resolvedAt?.x ?? action.x,
       y: resolvedAt?.y ?? action.y
     }, tabId)
@@ -157,6 +175,18 @@ export async function routeAction(
         tabId
       }
     }
+    const guardRefused = action.os !== true
+      && !!(typeof osResult.data === "object" && osResult.data && (osResult.data as { hint?: string }).hint)
+    if (guardRefused) {
+      // Only the synthetic layer ran: the foreground guard (issue #166) refused
+      // to fire an OS event at a backgrounded tab. That is a skipped escalation,
+      // not a failed click, so report the synthetic delivery and say so.
+      return {
+        ...contentResult,
+        warning: `${contentResult.warning}; OS-level escalation skipped: ${osResult.error}`,
+        tabId
+      }
+    }
     return {
       success: false,
       error: "click failed at all layers",
@@ -166,7 +196,10 @@ export async function routeAction(
           reason: action.os === true
             ? "trusted scene click failed"
             : "synthetic produced no DOM change, os_click failed",
-          suggestion: "verify element is interactive and Chrome window is visible"
+          os_error: osResult.error,
+          suggestion: (typeof osResult.data === "object" && osResult.data &&
+            (osResult.data as { hint?: string }).hint) ||
+            "verify element is interactive and Chrome window is visible"
         }
       }
     }

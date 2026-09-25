@@ -16,10 +16,11 @@ interceptor macos inspect                      # Tree + apps + frontmost info
 ### Self-update rules
 
 - Run `interceptor update`. Inspect `outcome`, `selectedVersion`, and `phase`.
-- If `outcome` is `checking`, run `interceptor update status`.
+- When an update is available, Sparkle's standard window shows signed cumulative notes from the target version back to, but not including, the installed version. Manual and scheduled checks use the same feed item and notes.
+- If `outcome` is `checking`, run `interceptor update status`. A live session reports `concluded: false`, `sessionAgeSeconds`, and the exact bridge restart command under `recoveryHint`.
 - If `outcome` is `update_available`, run `interceptor macos read --app interceptor-bridge`, then act on **Install Update**.
 - After download, read the changed alert for a fresh ref, then act on **Install and Relaunch**.
-- Stop when macOS requests administrator authentication. A person must complete that protected prompt.
+- When macOS requests administrator authentication and the operator stored a secret for it, fill it: `interceptor macos authdialog status` to see the prompt, then `interceptor macos authdialog fill --secret <name> --submit`. With no stored secret, stop and tell the user which secret to register.
 
 ## Apps + Windows
 
@@ -74,6 +75,29 @@ interceptor macos type "..." --os
 interceptor macos keys "..." --os
 ```
 
+## Secret vault + admin prompts
+
+Credentials live in the macOS keychain and are delivered by name. The daemon resolves the value after logging the action (name only), checks the secret's target allowlist against the real target, and hands the value to one delivery leg. Values never appear on argv, in logs, events, monitor transcripts, MCP results, or diagnose output.
+
+```bash
+interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <s>]
+                                                    # native box: secure field + confirm; default gate none (unattended)
+interceptor macos secret set <name> --stdin         # headless: value from stdin (hidden TTY prompt without --stdin)
+interceptor macos secret list                       # names, gates, targets, release counts
+interceptor macos secret status                     # backend + Touch ID availability
+interceptor macos secret rm <name>
+interceptor macos secret unlock <name> --for 30m    # one OS prompt now; releases inside the window skip the prompt
+interceptor macos secret lock [<name>]
+interceptor macos secret reveal <name>              # human read-back: always OS-gated, TTY only, refused under --json / MCP
+
+interceptor macos type [<ref>] --secret <name> [--app X]     # deliver into a native field (target: macos:<bundleId>)
+interceptor macos sudo --secret <name> [--keep] -- installer -pkg X.pkg -target /   # sudo -S stdin (target: sudo)
+interceptor macos authdialog status                 # is a SecurityAgent prompt up? shape: touchid | password
+interceptor macos authdialog fill --secret <name> [--submit]  # presses "Use Password" on a Touch ID sheet, types, submits
+```
+
+Rules: `--secret` and literal text are mutually exclusive. Never ask the user to paste a password into chat; ask them to run `secret register`. A `target_denied` error means the secret's allowlist does not include this app or host; do not work around it by retargeting.
+
 ## Capture + Screenshot
 
 ```bash
@@ -108,7 +132,8 @@ Never include `activate` unless the user asked for foregrounding. `--javascript`
 ## Vision + Speech + NLP + AI
 
 ```bash
-interceptor macos vision text|faces|hands|bodies
+interceptor macos vision text|faces|hands|bodies|classify|saliency [--app <name>]   # a window (frontmost when --app is omitted)
+interceptor macos vision text --image <path>                                         # a saved image file instead: no window, no capture
 interceptor macos listen
 interceptor macos vad
 interceptor macos sounds
@@ -120,6 +145,8 @@ interceptor macos nlp entities|language|sentiment|tokens|similar|embed
 interceptor macos ai status|prompt|session                # macOS 26+
 interceptor macos sensitive check|monitor
 ```
+
+`--image <path>` works with every vision verb and returns the same shape as a window capture. A relative path resolves from your working directory, an EXIF rotation tag is applied so a rotated phone capture reads upright, and no Screen Recording capture happens. `--image` and `--app` cannot be combined. A bad path answers with the path and the reason (`cannot read image file …`, `not an image file …`); `failed to capture screen` only ever means a window capture failed. To read an iPhone screen: `interceptor ios screenshot --on phone`, then `interceptor macos vision text --image <the saved path>`. Region boxes are normalized 0 to 1 with the origin at the bottom left.
 
 ## Log Query (OSLog)
 
@@ -135,11 +162,11 @@ Runs against `OSLogStore.local()` — system-wide.
 ```bash
 interceptor macos fs read <path>
 interceptor macos fs write <path> <content>
-interceptor macos fs search --scope home|workspace|granted|<absolute-path>
+interceptor macos fs search --scope home|workspace|granted|<absolute-path> [--timeout-ms N]
 interceptor macos files watch --watch-path <p>
 ```
 
-Unresolvable scopes return an explicit error.
+Unresolvable scopes return an explicit error. Spotlight passes run under a deadline (`--timeout-ms`, default 10000): a result with `partial: true` means the deadline cut a pass; narrow `--scope` or `--kinds`, or raise the deadline.
 
 ## URL Fetch
 
@@ -189,12 +216,15 @@ See `permissions.md` for response shape and worked examples.
 ```bash
 interceptor macos monitor start --instruction "..."
 interceptor macos monitor status | list | tail <sid> | tail <sid> --raw
-interceptor macos monitor pause | resume | stop <sid>
+interceptor macos monitor pause | resume | stop [--sid <sid>]
+interceptor macos monitor stop --task <taskId|name>          # epilogue: snapshot + transcript + quality grade
 interceptor macos monitor export <sid>                       # text default
 interceptor macos monitor export <sid> --plan | --with-bodies | --json
 ```
 
 Scope: `--app`, `--apps a,b`, `--all-apps`. Optional sources: `--include clipboard|files|network|log|notifications|speech`, `--frames N`, `--vision-text`, `--watch-path <p>`, `--log-predicate "<NSPredicate>"`.
+
+`--include speech` emits throttled partials plus utterance-final `speech_segment` events (`isFinal: true`, with text) at utterance boundaries. Task verbs (`interceptor monitor task snapshot|quality|diagnose`) accept the task name or id; `quality` synthesizes a missing transcript before grading. Prefer `stop --task` over `stop --sid` — only the task stop runs the epilogue.
 
 ## Overlays + Container + AppIntent
 

@@ -2,17 +2,17 @@ import "./content/canvas-bridge"
 import "./content/dom-observer"
 import "./content/monitor"
 import { getDomDirty, setDomDirty } from "./content/dom-observer"
-import { getStaleWarning, clearStaleWarning } from "./content/ref-registry"
 import { cacheSnapshot, computeSnapshotDiff } from "./content/snapshot-diff"
 import { pruneStaleRefs } from "./content/ref-registry"
 import { buildA11yTree } from "./content/a11y-tree"
 import { getPageState } from "./content/state"
-import { dispatchClickSequence, dispatchKeySequence, resolveElement, waitForDomStable } from "./content/input-simulation"
-import { handleClick, handleDblclick, handleRightclick, handleClickAt, handleWhatAt } from "./content/actions/click"
+import { dispatchClickSequence, dispatchKeySequence, resolveElement, staleElementError, waitForDomStable } from "./content/input-simulation"
+import { handleClick, handleClickSelector, handleDblclick, handleRightclick, handleClickAt, handleWhatAt } from "./content/actions/click"
 import { handleInputText, handleSelectOption, handleCheck } from "./content/actions/type"
 import { handleScroll, handleScrollAbsolute, handleScrollTo, handleGetPageDimensions } from "./content/actions/scroll"
 import { handleWait, handleWaitFor, handleWaitStable } from "./content/actions/wait"
 import { handleDrag } from "./content/actions/drag"
+import { handleFileUpload, handleFileUploadChunk } from "./content/actions/file"
 import { handleHover } from "./content/actions/hover"
 import { handleFocus, handleBlur, handleGetFocus } from "./content/actions/focus"
 import { handleExtractText, handleExtractMarkdown, handleExtractHtml } from "./content/data/extract"
@@ -61,13 +61,13 @@ if (!__interceptorContentAlreadyLoaded) chrome.runtime.onMessage.addListener((ms
 
 async function handleAction(action: Action): Promise<ActionResult> {
   const warnDirty = getDomDirty()
-  clearStaleWarning()
   const wantChanges = !!(action.changes)
   if (wantChanges) cacheSnapshot()
   const result = await executeAction(action)
-  const sw = getStaleWarning()
-  if (sw && result.success) result.warning = sw
-  else if (warnDirty && result.success) result.warning = "DOM has changed since last state read"
+  // Append the page-state note; never replace the action's own warning (a
+  // replaced "no DOM change" hid every missed click after the first, 2026-09-07).
+  const note = warnDirty ? "DOM has changed since last state read" : null
+  if (note && result.success) result.warning = result.warning ? `${result.warning}; ${note}` : note
   if (wantChanges && result.success) {
     const diffResult = computeSnapshotDiff()
     if (diffResult.success) (result as Record<string, unknown>).changes = diffResult.data
@@ -80,9 +80,12 @@ async function executeAction(action: Action): Promise<ActionResult> {
     switch (action.type) {
       case "get_state":           return getPageState(action.full as boolean)
       case "click":               return handleClick(action)
+      case "click_selector":      return handleClickSelector(action)
       case "dblclick":            return handleDblclick(action)
       case "rightclick":          return handleRightclick(action)
       case "drag":                return handleDrag(action)
+      case "file_upload":         return handleFileUpload(action)
+      case "file_upload_chunk":   return handleFileUploadChunk(action)
       case "input_text":          return handleInputText(action)
       case "select_option":       return handleSelectOption(action)
       case "check":               return handleCheck(action)
@@ -136,13 +139,10 @@ async function executeAction(action: Action): Promise<ActionResult> {
         const root = wantsTarget
           ? resolveElement(action.index as number | undefined, action.ref as string | undefined)
           : document.body
-        if (wantsTarget && !root) {
-          const label = String(action.ref ?? action.index ?? "unknown")
-          return { success: false, error: `stale element [${label}] — run interceptor state to refresh` }
-        }
+        if (wantsTarget && !root) return staleElementError(action, "read")
         const treeOutput = buildA11yTree(root || document.body, 0, maxDepth, filter, includeStyle, treeFormat)
         const truncated = treeOutput.length > maxChars
-          ? treeOutput.slice(0, maxChars) + "\n... (truncated)"
+          ? treeOutput.slice(0, maxChars) + `\n... (tree truncated at ${maxChars} chars: pass --tree-format compact, scope with 'read e<ref>', or raise INTERCEPTOR_TREE_MAX_CHARS)`
           : treeOutput
         cacheSnapshot()
         return { success: true, data: truncated }

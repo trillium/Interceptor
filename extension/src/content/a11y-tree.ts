@@ -1,3 +1,4 @@
+import { safeText } from "./sensitive"
 import { isVisible, isInteractive, INTERACTIVE_TAGS, INTERACTIVE_ROLES, getShadowRoot } from "./element-discovery"
 import { getOrAssignRef } from "./ref-registry"
 import { getRelevantAttrs, getStyleBundle } from "./element-tree"
@@ -5,7 +6,51 @@ import { getRelevantAttrs, getStyleBundle } from "./element-tree"
 export const LANDMARK_ROLES = new Set(["banner", "navigation", "main", "complementary", "contentinfo", "search", "form", "region"])
 export const LANDMARK_TAGS = new Set(["NAV", "MAIN", "ASIDE", "HEADER", "FOOTER", "FORM", "SECTION"])
 
-export function getEffectiveRole(el: Element): string {
+// An element is an upload target if it IS a file input or shallowly wraps one.
+// The depth bound keeps the hint high-signal — a dropzone root
+// renders its hidden <input type=file> as a near child, whereas a big modal /
+// <body> that merely contains one far below is not flagged. Surfacing this in
+// the a11y tree steers agents to `interceptor upload <ref> <path>` instead of
+// clicking (which opens a native OS panel the browser surface can't drive).
+export function isUploadTarget(el: Element, maxDepth = 3): boolean {
+  if (el instanceof HTMLInputElement && el.type === "file") return true
+  let frontier: Element[] = [el]
+  for (let d = 0; d < maxDepth && frontier.length; d++) {
+    const next: Element[] = []
+    for (const node of frontier) {
+      for (const child of Array.from(node.children)) {
+        if (child instanceof HTMLInputElement && child.type === "file") return true
+        next.push(child)
+      }
+    }
+    frontier = next
+  }
+  return false
+}
+
+// An invisible element's rect is otherwise pruned wholesale (its subtree
+// never visited). Two shapes must still be descended into instead, because
+// the element's own zero-area rect doesn't reflect its descendants: an
+// out-of-flow shrink-to-fit portal/popper (`absolute`/`fixed`), or an inline
+// (`display: inline`) grouping/target wrapper — e.g. a bare
+// `<span data-controller-target="...">` some JS component wraps fields in
+// purely as a hook, with no box of its own even though its block/flex
+// children render normally. Other in-flow boxes (`static`/`relative`/
+// `sticky` block-level, `block`/`flex`/`grid` display) are pruned as before,
+// so genuinely collapsed/empty in-flow content doesn't leak in — only
+// `inline` gets this exception, since block-level containers with real
+// content don't collapse to 0×0 unless they're actually empty.
+export function shouldDescendDespiteZeroArea(display: string, position: string): boolean {
+  return position === "fixed" || position === "absolute" || display === "inline"
+}
+
+// `style` is optional and only consulted on the SVG branch — pass the
+// already-computed style from full-DOM walks (a11y tree, element discovery)
+// so those stay at one computed-style read per element. No default-param
+// getComputedStyle here: a default expression evaluates on every call that
+// omits the arg, which would ADD a style read for the many callers that
+// never reach the SVG branch.
+export function getEffectiveRole(el: Element, style?: CSSStyleDeclaration): string {
   const explicit = el.getAttribute("role")
   if (explicit) return explicit
 
@@ -39,7 +84,7 @@ export function getEffectiveRole(el: Element): string {
   }
   if (el.namespaceURI === "http://www.w3.org/2000/svg") {
     if (tag === "a") return "link"
-    if (el.hasAttribute("onclick") || getComputedStyle(el).cursor === "pointer") return "button"
+    if (el.hasAttribute("onclick") || (style ?? getComputedStyle(el)).cursor === "pointer") return "button"
     return "img"
   }
   if (tag === "input") {
@@ -87,7 +132,7 @@ export function getAccessibleName(el: Element): string {
   const title = el.getAttribute("title")
   if (title && title.trim()) return title.trim()
 
-  return (el.textContent || "").trim().slice(0, 80)
+  return safeText(el).trim().slice(0, 80)
 }
 
 // Convert `getRelevantAttrs` output like `type="submit" href="/x"` into compact
@@ -117,15 +162,10 @@ export function buildA11yTree(
     if (d > maxDepth) return
 
     // Visibility disposition. `display:none` / `visibility:hidden` hide the
-    // whole subtree, so we stop. But an element that's invisible only because
-    // it is an out-of-flow box with a zero-area rect — a shrink-to-fit portal /
-    // popper wrapper that has collapsed to 0×0 while its descendants render
-    // elsewhere — must still be descended into: those descendants are
-    // visibility-checked individually. Only genuinely out-of-flow positions
-    // (CSS "removed from normal flow" = `absolute` / `fixed`) qualify; in-flow
-    // boxes (`static` / `relative` / `sticky` — sticky is in-flow per CSS) are
-    // pruned as before, so collapsed/empty in-flow content doesn't leak in. The
-    // element itself is only emitted when it is actually visible.
+    // whole subtree, so we stop. An invisible element that's only zero-area
+    // (see shouldDescendDespiteZeroArea) must still be descended into: its
+    // descendants are visibility-checked individually. The element itself is
+    // only emitted when it is actually visible.
     //
     // One computed-style read per element, shared between the visibility test
     // and the disposition below: isVisible() reads computed style too, so we
@@ -134,15 +174,14 @@ export function buildA11yTree(
     const selfVisible = el.tagName === "BODY" || isVisible(el, style!)
     if (!selfVisible) {
       if (style!.display === "none" || style!.visibility === "hidden") return
-      const pos = style!.position
-      if (pos !== "fixed" && pos !== "absolute") return
+      if (!shouldDescendDespiteZeroArea(style!.display, style!.position)) return
     }
 
-    const role = getEffectiveRole(el)
+    const role = getEffectiveRole(el, style ?? undefined)
     const tag = el.tagName.toLowerCase()
     const isLandmark = LANDMARK_ROLES.has(role) || LANDMARK_TAGS.has(el.tagName)
     const isHeading = /^h[1-6]$/.test(tag) || role === "heading"
-    const isInteractiveEl = isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES)
+    const isInteractiveEl = isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES, style ?? undefined)
     const prefix = compact ? ">".repeat(d) : "  ".repeat(d)
 
     if (selfVisible && isLandmark && !isInteractiveEl) {
@@ -170,16 +209,19 @@ export function buildA11yTree(
       const name = getAccessibleName(el)
       const attrs = getRelevantAttrs(el)
       const styleBundle = includeStyle ? getStyleBundle(el) : ""
+      const uploadable = isUploadTarget(el)
       if (compact) {
         const nameClause = name ? `|${name}` : ""
         const attrClause = compactAttrClause(attrs)
         const styleClause = styleBundle ? `|style={${styleBundle}}` : ""
-        lines.push(`${prefix}[${refId}|${role || tag}${nameClause}${attrClause}${styleClause}]`)
+        const uploadClause = uploadable ? "|upload" : ""
+        lines.push(`${prefix}[${refId}|${role || tag}${nameClause}${attrClause}${styleClause}${uploadClause}]`)
       } else {
         const nameStr = name ? ` "${name}"` : ""
         const attrStr = attrs ? ` ${attrs}` : ""
         const styleStr = styleBundle ? ` style="${styleBundle}"` : ""
-        lines.push(`${prefix}[${refId}] ${role || tag}${nameStr}${attrStr}${styleStr}`)
+        const uploadStr = uploadable ? ` upload="interceptor upload ${refId} <path>"` : ""
+        lines.push(`${prefix}[${refId}] ${role || tag}${nameStr}${attrStr}${styleStr}${uploadStr}`)
       }
     }
 

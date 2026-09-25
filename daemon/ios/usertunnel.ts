@@ -90,7 +90,7 @@ type Conn = {
   sport: number; dport: number; seq: number; ack: number
   established: boolean; onData: (b: Buffer) => void; onEstablished: () => void; onClose: () => void
 }
-class Tun {
+export class Tun {
   private conns = new Map<number, Conn>()
   private racc = Buffer.alloc(0)
   constructor(private cdp: net.Socket, private myIp: Buffer, private devIp: Buffer) {
@@ -160,11 +160,15 @@ class Tun {
     })
   }
 }
-type TcpChan = { write: (b: Buffer) => void; onData: (cb: (b: Buffer) => void) => void; onClose: (cb: () => void) => void; close: () => void }
+export type TcpChan = { write: (b: Buffer) => void; onData: (cb: (b: Buffer) => void) => void; onClose: (cb: () => void) => void; close: () => void }
 
 // ── XPC wire codec (from rsd.ts, matches go-ios xpc/encoding.go) ──────────────
 const WRAPPER_MAGIC = 0x29b00b92, OBJ_MAGIC = 0x42133742, OBJ_VERSION = 5
-const F_ALWAYS = 0x00000001, F_DATA = 0x00000100, F_HEARTBEAT_REQ = 0x00010000, F_INIT = 0x00400000
+// Flag names follow go-ios ios/xpc/encoding.go. pymobiledevice3 calls the same
+// bits WANTING_REPLY / REPLY. 0x00010000 on an empty wrapper is the RemoteXPC
+// keepalive the device expects answered with 0x00020000 + the same message id.
+export const F_ALWAYS = 0x00000001, F_DATA = 0x00000100, F_HEARTBEAT_REQ = 0x00010000, F_HEARTBEAT_REPLY = 0x00020000, F_INIT = 0x00400000
+const F_TERMINATOR = 0x0200 // 0x0201 handshake terminator; never a heartbeat
 class U64 { constructor(public v: bigint | number) {} }
 class I64 { constructor(public v: bigint | number) {} }
 class Dbl { constructor(public v: number) {} }
@@ -199,7 +203,7 @@ function encObject(v: unknown): Buffer {
   }
   throw new Error(`encObject: cannot encode ${typeof v}`)
 }
-function encodeWrapper(dict: Record<string, unknown> | null, flags: number, messageId = 0): Buffer {
+export function encodeWrapper(dict: Record<string, unknown> | null, flags: number, messageId = 0): Buffer {
   const hdr = Buffer.alloc(24)
   hdr.writeUInt32LE(WRAPPER_MAGIC, 0); hdr.writeUInt32LE(flags >>> 0, 4); hdr.writeBigUInt64LE(BigInt(messageId), 16)
   if (dict === null) { hdr.writeBigUInt64LE(0n, 8); return hdr }
@@ -242,7 +246,7 @@ function decObject(r: Reader): unknown {
     default: throw new Error(`decObject: unknown type 0x${t.toString(16)} at off ${r.off - 4}`)
   }
 }
-function tryDecodeWrapper(buf: Buffer): { flags: number; msgId: number; body: Record<string, unknown> | null; consumed: number } | null {
+export function tryDecodeWrapper(buf: Buffer): { flags: number; msgId: number; body: Record<string, unknown> | null; consumed: number } | null {
   if (buf.length < 24) return null
   const bodyLen = Number(buf.readBigUInt64LE(8))
   const need = 24 + bodyLen
@@ -254,10 +258,24 @@ function tryDecodeWrapper(buf: Buffer): { flags: number; msgId: number; body: Re
   return { flags, msgId, body: decObject(r) as Record<string, unknown>, consumed: need }
 }
 
+/** Empty inbound wrapper with WANTING_REPLY set: answer it, do not hand it to request waiters. */
+export function isXpcEmptyHeartbeatRequest(flags: number, body: Record<string, unknown> | null): boolean {
+  if ((flags & F_HEARTBEAT_REQ) === 0) return false
+  if ((flags & F_HEARTBEAT_REPLY) !== 0) return false
+  if ((flags & F_INIT) !== 0) return false
+  if ((flags & F_TERMINATOR) !== 0) return false
+  if (body == null) return true
+  return (flags & F_DATA) === 0 && Object.keys(body).length === 0
+}
+
+export function encodeXpcHeartbeatReply(msgId: number): Buffer {
+  return encodeWrapper(null, F_ALWAYS | F_HEARTBEAT_REPLY, msgId)
+}
+
 // ── HTTP/2 minimal framing (from rsd.ts) ──────────────────────────────────────
 const H2_MAGIC = Buffer.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-const FT_DATA = 0x0, FT_HEADERS = 0x1, FT_RST = 0x3, FT_SETTINGS = 0x4, FT_PING = 0x6, FT_GOAWAY = 0x7, FT_WINDOW_UPDATE = 0x8
-function h2frame(type: number, flags: number, streamId: number, payload: Buffer): Buffer {
+export const FT_DATA = 0x0, FT_HEADERS = 0x1, FT_RST = 0x3, FT_SETTINGS = 0x4, FT_PING = 0x6, FT_GOAWAY = 0x7, FT_WINDOW_UPDATE = 0x8
+export function h2frame(type: number, flags: number, streamId: number, payload: Buffer): Buffer {
   const h = Buffer.alloc(9); h.writeUIntBE(payload.length, 0, 3); h.writeUInt8(type, 3); h.writeUInt8(flags, 4); h.writeUInt32BE(streamId >>> 0, 5)
   return Buffer.concat([h, payload])
 }
@@ -265,12 +283,12 @@ function settingsFrame(s: [number, number][]): Buffer {
   const p = Buffer.alloc(s.length * 6); s.forEach(([id, v], i) => { p.writeUInt16BE(id, i * 6); p.writeUInt32BE(v >>> 0, i * 6 + 2) }); return h2frame(FT_SETTINGS, 0, 0, p)
 }
 function windowUpdate(streamId: number, incr: number): Buffer { const p = Buffer.alloc(4); p.writeUInt32BE(incr >>> 0, 0); return h2frame(FT_WINDOW_UPDATE, 0, streamId, p) }
-const ROOT = 1, REPLY = 3
+export const ROOT = 1, REPLY = 3
 
 // A RemoteXPC "service" connection over one TCP chan: 2 H2 streams (1=cs, 3=sc),
 // the per-service init handshake, then send()/receive() XPC dicts. Mirrors
 // go-ios ios/http + ios/xpc CreateXpcConnection/initializeXpcConnection.
-class XpcService {
+export class XpcService {
   private inbound = Buffer.alloc(0)
   private csBuf = Buffer.alloc(0)   // stream 1 XPC bytes
   private scBuf = Buffer.alloc(0)   // stream 3 XPC bytes
@@ -309,6 +327,15 @@ class XpcService {
     let dec = tryDecodeWrapper((this as any)[bufName])
     while (dec) {
       ;(this as any)[bufName] = (this as any)[bufName].subarray(dec.consumed)
+      if (isXpcEmptyHeartbeatRequest(dec.flags, dec.body)) {
+        if (DBG) console.error(`[${this.tag}] heartbeat req msgId=${dec.msgId} on ${which}`)
+        // Device-originated empty WANTING_REPLY. Answer on the opposite H2
+        // stream (cs↔sc) and do not deliver to request waiters — a pending
+        // app.request() would otherwise take the keepalive as its reply.
+        this.writeStream(which === "cs" ? REPLY : ROOT, encodeXpcHeartbeatReply(dec.msgId))
+        dec = tryDecodeWrapper((this as any)[bufName])
+        continue
+      }
       const m = { flags: dec.flags, msgId: dec.msgId, body: dec.body }
       if (DBG) console.error(`[${this.tag}] <${which} flags=0x${dec.flags.toString(16)} msgId=${dec.msgId} keys=${dec.body ? Object.keys(dec.body).join(",") : "∅"}`)
       // advance our send counter past the reply's message id (device tracks it per stream)
@@ -414,7 +441,7 @@ function encodeDtx(identifier: number, conversationIndex: number, channelCode: n
   }
   return msg
 }
-type DtxMsg = {
+export type DtxMsg = {
   fragments: number; fragmentIndex: number; messageLength: number
   identifier: number; conversationIndex: number; channelCode: number; expectsReply: boolean
   msgType: number; auxLen: number; totalPayloadLen: number
@@ -433,6 +460,13 @@ function decodeDtx(buf: Buffer): { msg: DtxMsg; consumed: number } | null {
   }
   const total = 32 + messageLength
   if (buf.length < total) return null
+  // Mid/last fragment of a multi-fragment message: the bytes after the 32-byte
+  // routing header are a RAW payload chunk — there is NO per-fragment payload
+  // header (only the reassembled whole has one). Hand back the chunk as
+  // payloadRaw; handle() concatenates chunks then parses the real header.
+  if (fragments > 1 && fragmentIndex > 0) {
+    return { msg: { fragments, fragmentIndex, messageLength, identifier, conversationIndex, channelCode, expectsReply, msgType: -1, auxLen: 0, totalPayloadLen: 0, aux: Buffer.alloc(0), payloadRaw: Buffer.from(buf.subarray(32, total)) }, consumed: total }
+  }
   const msgType = buf.readUInt32LE(32)
   const auxLen = buf.readUInt32LE(36)          // includes 16-byte aux header when >0
   const totalPayloadLen = buf.readUInt32LE(40)
@@ -443,8 +477,23 @@ function decodeDtx(buf: Buffer): { msg: DtxMsg; consumed: number } | null {
   if (payLen > 0) payloadRaw = Buffer.from(buf.subarray(payStart, payStart + payLen))
   return { msg: { fragments, fragmentIndex, messageLength, identifier, conversationIndex, channelCode, expectsReply, msgType, auxLen, totalPayloadLen, aux, payloadRaw }, consumed: total }
 }
+// Reassemble a fragmented DTX message: `full` is the concatenated payload chunks
+// (fragments 1..N-1), which begins with the 16-byte DTXMessagePayloadHeader. Mirrors
+// decodeDtx's non-fragmented payload slicing but relative to the payload start.
+function reassembleDtxPayload(full: Buffer, routing: DtxMsg): DtxMsg {
+  const msgType = full.readUInt32LE(0)
+  const auxLen = full.readUInt32LE(4)          // includes 16-byte aux header when >0
+  const totalPayloadLen = full.readUInt32LE(8)
+  let aux = Buffer.alloc(0), payloadRaw = Buffer.alloc(0)
+  if (auxLen > 0) aux = Buffer.from(full.subarray(32, 16 + auxLen))
+  const payStart = auxLen > 0 ? 16 + auxLen : 16
+  const payLen = totalPayloadLen - auxLen
+  if (payLen > 0) payloadRaw = Buffer.from(full.subarray(payStart, payStart + payLen))
+  return { ...routing, msgType, auxLen, totalPayloadLen, aux, payloadRaw }
+}
+
 // parse aux primitive dict -> ordered list of {type, value}
-function parseAux(aux: Buffer): Array<{ type: number; value: Buffer | number }> {
+export function parseAux(aux: Buffer): Array<{ type: number; value: Buffer | number }> {
   const out: Array<{ type: number; value: Buffer | number }> = []
   let o = 0
   while (o + 4 <= aux.length) {
@@ -459,13 +508,13 @@ function parseAux(aux: Buffer): Array<{ type: number; value: Buffer | number }> 
 }
 
 // ── NSKeyedArchiver via plutil (XML object graph -> binary plist) ─────────────
-type PlistNode =
+export type PlistNode =
   | { str: string } | { int: number | bigint } | { real: number } | { bool: boolean }
   | { data: Buffer } | { uuid: Buffer } | { dict: Record<string, PlistNode> } | { arr: PlistNode[] }
   | { url: string } | { nul: true } | { obj: { cls: string; props: Record<string, PlistNode> } }
   | { xctcaps: Record<string, PlistNode> }
 function xmlEscape(s: string) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") }
-function nskeyedArchive(n: PlistNode): Buffer {
+export function nskeyedArchive(n: PlistNode): Buffer {
   return buildArchiveOffset(n)
 }
 // Build objects with a leading $null already accounted for.
@@ -559,6 +608,15 @@ function archiveNodeAbs(n: PlistNode, objects: string[]): number {
 function plutilToBinary(xml: Buffer): Buffer {
   return execFileSync("plutil", ["-convert", "binary1", "-o", "-", "-"], { input: xml, maxBuffer: 64 * 1024 * 1024 })
 }
+
+/** go-ios appservice UI-test launch flags. An empty dict leaves the runner unable to background (XCTest 10300). */
+export function uiTestPlatformSpecificOptionsXml(): string {
+  return `<?xml version="1.0"?><plist version="1.0"><dict>` +
+    `<key>ActivateSuspended</key><integer>1</integer>` +
+    `<key>StartSuspendedKey</key><integer>0</integer>` +
+    `<key>__ActivateSuspended</key><integer>1</integer>` +
+    `</dict></plist>`
+}
 function plutilToXml(bin: Buffer): string {
   try { return execFileSync("plutil", ["-convert", "xml1", "-o", "-", "-"], { input: bin, maxBuffer: 64 * 1024 * 1024 }).toString("utf8") }
   catch { return "<plutil decode failed>" }
@@ -566,7 +624,7 @@ function plutilToXml(bin: Buffer): string {
 
 // ── a DTX channel abstraction over a raw TCP chan ─────────────────────────────
 const DTX_METHODINVOCATION = 0x2, DTX_ACK = 0x0, DTX_RESPONSE = 0x3, DTX_ERROR = 0x4
-class DtxConnection {
+export class DtxConnection {
   private inbound = Buffer.alloc(0)
   private frags = new Map<number, Buffer[]>()   // identifier -> collected fragment bodies
   private globalMsgId = 5
@@ -578,9 +636,24 @@ class DtxConnection {
   // a DTX RESPONSE (e.g. _XCT_testRunnerReadyWithCapabilities: -> XCTestConfiguration).
   private handlers = new Map<string, (m: DtxMsg) => PlistNode | null | void>()
   onCall(selector: string, fn: (m: DtxMsg) => PlistNode | null | void): void { this.handlers.set(selector, fn) }
+  // Per-channel raw-message listeners for streaming services (e.g. Instruments
+  // sysmontap/graphics push samples as unsolicited channel frames). Registered
+  // AFTER the setup calls resolve, so it never swallows a channelCall reply.
+  private channelListeners = new Map<number, (m: DtxMsg) => void>()
+  onChannelMessage(code: number, cb: (m: DtxMsg) => void): void { this.channelListeners.set(code, cb) }
+  offChannelMessage(code: number): void { this.channelListeners.delete(code) }
+  // Broadcast listener for services that push unsolicited samples on the device's
+  // OWN channel (Instruments sysmontap/graphics stream on channelCode -1, NOT the
+  // requested channel). Returns true if it consumed the frame. Registered only
+  // while streaming (after setup resolves), so it never eats a pending reply.
+  private broadcast?: (m: DtxMsg) => boolean
+  onBroadcast(cb: (m: DtxMsg) => boolean): void { this.broadcast = cb }
+  offBroadcast(): void { this.broadcast = undefined }
   constructor(private chan: TcpChan, private tag: string) {
     chan.onData((c) => this.onData(c))
   }
+  /** Release the underlying channel. */
+  close(): void { try { this.chan.close() } catch {} }
   private onData(chunk: Buffer) {
     this.inbound = Buffer.concat([this.inbound, chunk])
     let dec = decodeDtx(this.inbound)
@@ -591,18 +664,29 @@ class DtxConnection {
     }
   }
   private handle(m: DtxMsg) {
-    // reassemble fragments
+    // reassemble fragments: fragment 0 is header-only; fragments 1..N-1 each carry a
+    // raw payload chunk. Concatenate the chunks, then parse the single payload header
+    // (msgType/auxLen/totalPayloadLen) out of the reassembled whole.
     if (m.fragments > 1) {
       if (m.fragmentIndex === 0) { this.frags.set(m.identifier, []); if (m.expectsReply) this.sendAck(m); return }
       const list = this.frags.get(m.identifier)
       if (list) {
-        // for non-first fragments, we stored raw messageLength bytes; but our decoder
-        // already parsed the payload/aux on the last-fragment header. Simplify: only
-        // multi-fragment we expect are large replies; collect payloadRaw+aux.
-        list.push(Buffer.concat([m.aux, m.payloadRaw]))
-        if (m.fragments - m.fragmentIndex === 1) { this.frags.delete(m.identifier); /* treat as complete below */ }
+        list.push(m.payloadRaw)
+        if (m.fragments - m.fragmentIndex === 1) { this.frags.delete(m.identifier); m = reassembleDtxPayload(Buffer.concat(list), m) }
         else return
       }
+    }
+    // Streaming channel listener (sysmontap/graphics): consume every frame on a
+    // listened non-global channel. Only set while streaming, so no call replies race it.
+    if (m.channelCode !== 0) {
+      const cl = this.channelListeners.get(m.channelCode)
+      if (cl) { cl(m); if (m.expectsReply) this.sendAck(m); return }
+    }
+    // Broadcast: Instruments streams samples on the device's push channel (-1),
+    // not the requested channel. Give a registered broadcast first refusal on any
+    // non-global frame; if it consumes, we're done.
+    if (m.channelCode !== 0 && this.broadcast) {
+      if (this.broadcast(m)) { if (m.expectsReply) this.sendAck(m); return }
     }
     if (DBG) {
       const tName = { 0: "Ack", 2: "Invoke", 3: "Response", 4: "Error" }[m.msgType] ?? `t${m.msgType}`
@@ -792,20 +876,8 @@ function createTestConfig(sessionUuidBytes: Buffer, productModuleName: string, t
 export async function launchRunnerOverUserspaceTunnel(udid: string, opts: UserspaceLaunchOptions): Promise<UserspaceRunnerHandle> {
   const runnerBundle = opts.bundleId ?? RUNNER_BUNDLE
   const log = opts.log ?? (() => {})
-  // 1. tunnel + RSD
-  const { sock: cdp } = await connectServiceSocket(udid, "com.apple.internal.devicecompute.CoreDeviceProxy")
-  const rq = Buffer.from(JSON.stringify({ type: "clientHandshakeRequest", mtu: 1280 }))
-  cdp.write(Buffer.concat([Buffer.from("CDTunnel\0"), Buffer.from([rq.length]), rq]))
-  const params: any = await new Promise((res, rej) => {
-    let acc = Buffer.alloc(0); const t = setTimeout(() => rej(new Error("cdtunnel hs timeout")), 8000)
-    const on = (c: Buffer) => { acc = Buffer.concat([acc, c]); if (acc.length >= 10 && acc.length >= 10 + acc[9]) { clearTimeout(t); cdp.off("data", on); res(JSON.parse(acc.subarray(10, 10 + acc[9]).toString())) } }
-    cdp.on("data", on); cdp.on("error", rej)
-  })
-  const myIp = parseIp6(params.clientParameters.address), devIp = parseIp6(params.serverAddress)
-  const tun = new Tun(cdp, myIp, devIp)
-  const rsdChan = await tun.connect(params.serverRSDPort as number)
-  const services = await rsdHandshake(rsdChan)
-  log(`RSD: ${Object.keys(services).length} services enumerated`)
+  // 1. tunnel + RSD (shared with the web-inspection device-service broker)
+  const { tun, cdp, services } = await openRemoteXpcTunnel(udid, log)
   const port = (name: string) => {
     const p = services[name]; if (!p) throw new Error(`service ${name} not found`); return p
   }
@@ -847,6 +919,16 @@ export async function launchRunnerOverUserspaceTunnel(udid: string, opts: Usersp
   dtx1.onCall("_XCT_logDebugMessage:", (m) => { const s = decodeArg0(m); if (s.trim()) log(`RUNNER LOG: ${s.slice(0, 240)}`) })
   dtx1.onCall("_XCT_didFinishExecutingTestPlan", () => { log("*** test plan FINISHED ***") })
   dtx1.onCall("_XCT_didBeginExecutingTestPlan", () => { log("*** test plan BEGAN ***") })
+  // The runner reports XCUITest init failures here. Error 10300 ("Failed to
+  // background test runner within 30.0s") happens when the screen is locked
+  // OR when appservice launched the runner without UI-test activation flags.
+  dtx1.onCall("_XCT_initializationForUITestingDidFailWithError:", (m) => {
+    const err = decodeArg0(m)
+    log(`*** UI-TESTING INIT FAILED: ${err.slice(0, 220)} ***`)
+    if (/background test runner|\b10300\b/i.test(err)) {
+      log("HINT: XCUITest could not background the runner within 30s. Unlock the iPhone and set Settings → Display & Brightness → Auto-Lock → Never, then retry.")
+    }
+  })
   const localCaps: Record<string, PlistNode> = {
     "XCTIssue capability": { int: 1 }, "daemon container sandbox extension": { int: 1 },
     "delayed attachment transfer": { int: 1 }, "expected failure test capability": { int: 1 },
@@ -898,7 +980,7 @@ export async function launchRunnerOverUserspaceTunnel(udid: string, opts: Usersp
     "XCTestConfigurationFilePath": "", "XCTestManagerVariant": "DDI",
     "XCTestSessionIdentifier": testSessionID,
   }
-  const platformOpts = plutilToBinary(Buffer.from(`<?xml version="1.0"?><plist version="1.0"><dict/></plist>`, "utf8"))
+  const platformOpts = plutilToBinary(Buffer.from(uiTestPlatformSpecificOptionsXml(), "utf8"))
 
   const logRunnerStdio = (b: Buffer) => {
     const text = b.toString("utf8").replace(/\0/g, "").trim()
@@ -1104,6 +1186,32 @@ function reportReply(name: string, m: any, log: (message: string) => void = cons
   log(`  ${name}: OK (c${m.channelCode} i${m.identifier}.${m.conversationIndex}) ${summary}`)
 }
 
+export type RemoteXpcTunnel = { tun: Tun; cdp: net.Socket; services: Record<string, number> }
+
+/**
+ * Bring up the CoreDeviceProxy CDTunnel + userspace TCP mux + RSD handshake and
+ * return the tunnel plus the enumerated service→port map. Extracted verbatim
+ * from launchRunnerOverUserspaceTunnel so runner-launch and the web-inspection
+ * device-service broker (daemon/ios/device-services.ts) share ONE RemoteXPC
+ * bring-up instead of duplicating the tunnel handshake.
+ */
+export async function openRemoteXpcTunnel(udid: string, log: (m: string) => void = () => {}): Promise<RemoteXpcTunnel> {
+  const { sock: cdp } = await connectServiceSocket(udid, "com.apple.internal.devicecompute.CoreDeviceProxy")
+  const rq = Buffer.from(JSON.stringify({ type: "clientHandshakeRequest", mtu: 1280 }))
+  cdp.write(Buffer.concat([Buffer.from("CDTunnel\0"), Buffer.from([rq.length]), rq]))
+  const params: any = await new Promise((res, rej) => {
+    let acc = Buffer.alloc(0); const t = setTimeout(() => rej(new Error("cdtunnel hs timeout")), 8000)
+    const on = (c: Buffer) => { acc = Buffer.concat([acc, c]); if (acc.length >= 10 && acc.length >= 10 + acc[9]) { clearTimeout(t); cdp.off("data", on); res(JSON.parse(acc.subarray(10, 10 + acc[9]).toString())) } }
+    cdp.on("data", on); cdp.on("error", rej)
+  })
+  const myIp = parseIp6(params.clientParameters.address), devIp = parseIp6(params.serverAddress)
+  const tun = new Tun(cdp, myIp, devIp)
+  const rsdChan = await tun.connect(params.serverRSDPort as number)
+  const services = await rsdHandshake(rsdChan)
+  log(`RSD: ${Object.keys(services).length} services enumerated`)
+  return { tun, cdp, services }
+}
+
 // RSD handshake over the given TCP chan; returns {serviceName: port}
 async function rsdHandshake(chan: TcpChan): Promise<Record<string, number>> {
   const app = new XpcServiceRaw(chan)
@@ -1111,13 +1219,37 @@ async function rsdHandshake(chan: TcpChan): Promise<Record<string, number>> {
 }
 // RSD uses the same H2/XPC but a slightly different message sequence (Handshake
 // with Services). Reuse XpcService's frame plumbing via a thin subclass.
-class XpcServiceRaw {
+export class XpcServiceRaw {
   private inbound = Buffer.alloc(0)
   private rootBuf = Buffer.alloc(0)
+  private replyBuf = Buffer.alloc(0)
   private waiters: Array<(w: any) => void> = []
   private pend: any[] = []
   private gotSettings = false
+  private rootHeadersSent = false
+  private replyHeadersSent = false
   constructor(private chan: TcpChan) { chan.onData((c) => this.onData(c)) }
+  private writeRaw(sid: number, xpc: Buffer) {
+    if (sid === ROOT && !this.rootHeadersSent) { this.chan.write(h2frame(FT_HEADERS, 0x4, ROOT, Buffer.alloc(0))); this.rootHeadersSent = true }
+    if (sid === REPLY && !this.replyHeadersSent) { this.chan.write(h2frame(FT_HEADERS, 0x4, REPLY, Buffer.alloc(0))); this.replyHeadersSent = true }
+    this.chan.write(h2frame(FT_DATA, 0, sid, xpc))
+  }
+  private drainRaw(which: "root" | "reply") {
+    const bufName = which === "root" ? "rootBuf" : "replyBuf"
+    let dec = tryDecodeWrapper((this as any)[bufName] as Buffer)
+    while (dec) {
+      ;(this as any)[bufName] = ((this as any)[bufName] as Buffer).subarray(dec.consumed)
+      if (isXpcEmptyHeartbeatRequest(dec.flags, dec.body)) {
+        this.writeRaw(which === "root" ? REPLY : ROOT, encodeXpcHeartbeatReply(dec.msgId))
+        dec = tryDecodeWrapper((this as any)[bufName] as Buffer)
+        continue
+      }
+      if (which === "root") {
+        const w = this.waiters.shift(); if (w) w(dec); else this.pend.push(dec)
+      }
+      dec = tryDecodeWrapper((this as any)[bufName] as Buffer)
+    }
+  }
   private onData(chunk: Buffer) {
     this.inbound = Buffer.concat([this.inbound, chunk])
     while (this.inbound.length >= 9) {
@@ -1129,8 +1261,10 @@ class XpcServiceRaw {
       else if (type === FT_PING) { if (!(flags & 0x1)) this.chan.write(h2frame(FT_PING, 0x1, 0, Buffer.from(payload))) }
       else if (type === FT_DATA && sid === ROOT) {
         this.rootBuf = Buffer.concat([this.rootBuf, payload])
-        let dec = tryDecodeWrapper(this.rootBuf)
-        while (dec) { this.rootBuf = this.rootBuf.subarray(dec.consumed); const w = this.waiters.shift(); if (w) w(dec); else this.pend.push(dec); dec = tryDecodeWrapper(this.rootBuf) }
+        this.drainRaw("root")
+      } else if (type === FT_DATA && sid === REPLY) {
+        this.replyBuf = Buffer.concat([this.replyBuf, payload])
+        this.drainRaw("reply")
       }
     }
   }
@@ -1142,9 +1276,9 @@ class XpcServiceRaw {
     this.chan.write(H2_MAGIC)
     this.chan.write(settingsFrame([[0x3, 100], [0x4, 16 * 1024 * 1024]]))
     this.chan.write(windowUpdate(0, 16 * 1024 * 1024 - 65535))
-    this.chan.write(h2frame(FT_HEADERS, 0x4, ROOT, Buffer.alloc(0)))
+    this.chan.write(h2frame(FT_HEADERS, 0x4, ROOT, Buffer.alloc(0))); this.rootHeadersSent = true
     this.chan.write(h2frame(FT_DATA, 0, ROOT, encodeWrapper({}, F_ALWAYS, 0)))
-    this.chan.write(h2frame(FT_HEADERS, 0x4, REPLY, Buffer.alloc(0)))
+    this.chan.write(h2frame(FT_HEADERS, 0x4, REPLY, Buffer.alloc(0))); this.replyHeadersSent = true
     this.chan.write(h2frame(FT_DATA, 0, ROOT, encodeWrapper(null, 0x0201, 0)))
     this.chan.write(h2frame(FT_DATA, 0, REPLY, encodeWrapper(null, F_ALWAYS | F_INIT, 0)))
     const start = Date.now(); while (!this.gotSettings && Date.now() - start < 4000) await new Promise((r) => setTimeout(r, 50))

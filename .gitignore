@@ -1,10 +1,20 @@
 node_modules/
 .build/
+# Orphaned temp files (~98MB each) from interrupted `bun build --compile` runs
+*.bun-build
+# Pinned Bun cross-compile seeds the Windows release lane drops in the workspace
+# root (bun-windows-<arch>-v<version>); untracked, they stamped every Windows
+# build `-dirty` (scripts/build.sh reads `git status --porcelain --untracked-files=normal`).
+/bun-windows-*-v*
 .claude/worktrees/
 dist/
 extension/dist/
+extension/dist-safari/
 daemon/interceptor-daemon
 daemon/*.exe
+# Live images moved aside by build.sh's prepare_windows_outputs (Windows locks a
+# running .exe against write/delete but allows rename). Reaped on a later build.
+daemon/*.exe.old-*
 daemon/.generated/
 *.log
 /tmp/
@@ -25,6 +35,8 @@ scripts/refresh-apple-docs.ts
 scripts/flatten-apple-docs.ts
 apple-developer-docs/
 interceptor-bridge/.build/
+safari/build/
+safari/InterceptorSafari/InterceptorSafari\ Extension/Resources/
 keys/
 /.vscode/
 /Auto\ Run\ Docs/
@@ -74,3 +86,9 @@ use-cases/deep-research-demo/
 # Apple container runtime data dir (symlinked from ~/Library/Application Support/com.apple.container/)
 # Holds Linux container images + per-container VM disk state; never tracked.
 .container-data/
+
+# graphify knowledge-graph output (local analysis artifacts, never shipped)
+**/graphify-out/
+
+# GitNexus skill copies (local code-intelligence tooling, not shipped)
+.agents/skills/gitnexus-*/

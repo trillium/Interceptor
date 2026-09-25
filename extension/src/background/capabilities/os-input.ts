@@ -3,17 +3,73 @@ import { debuggerAttached } from "../cdp"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
+type WindowBounds = { left: number; top: number; width: number; height: number }
+
+// Leads with the background-safe path on purpose: agents follow the first
+// suggestion in a hint literally, and `tab switch` replaces what the user is
+// looking at.
+const FOREGROUND_HINT =
+  "trusted OS input needs the target tab visible in the OS-focused window. " +
+  "Try synthetic input first (drop --trusted; dispatched events carry the trust marker most sites check). " +
+  "If the page really needs an OS click, `interceptor tab switch <id>` shows the tab in its window " +
+  "and replaces what the user is looking at; switch back to the previous tab when done."
+
+// Trusted OS events are posted to the global HID tap, which macOS routes by
+// screen position and window z-order — not by tab. Delivery is only correct
+// when the target tab is the visible tab of the OS-focused window; anything
+// else lands the event in whatever is frontmost (issue #166: coordinates were
+// also derived from chrome.windows.getCurrent(), i.e. the last-focused window,
+// not the window owning tabId). Chromium itself swallows the first click on an
+// inactive window to activate it (RenderWidgetHostViewCocoa acceptsFirstMouse:
+// defaults to kWhenInActiveWindow), so background delivery cannot work —
+// refuse loudly instead of writing into the wrong app.
+async function requireForegroundTab(tabId: number): Promise<
+  { ok: true; windowBounds: WindowBounds } | { ok: false; result: ActionResult }
+> {
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (!tab) {
+    return { ok: false, result: { success: false, error: `tab ${tabId} not found` } }
+  }
+  const win = await chrome.windows.get(tab.windowId).catch(() => null)
+  if (!win) {
+    return { ok: false, result: { success: false, error: `window ${tab.windowId} not found for tab ${tabId}` } }
+  }
+  if (win.state === "minimized") {
+    return { ok: false, result: {
+      success: false,
+      error: `window ${tab.windowId} is minimized — trusted OS input needs on-screen pixels to hit`,
+      data: { hint: FOREGROUND_HINT, windowState: win.state }
+    } }
+  }
+  if (!tab.active) {
+    return { ok: false, result: {
+      success: false,
+      error: `tab ${tabId} is not the active tab of window ${tab.windowId} — a trusted OS event would hit the window's visible tab instead`,
+      data: { hint: FOREGROUND_HINT }
+    } }
+  }
+  if (!win.focused) {
+    return { ok: false, result: {
+      success: false,
+      error: `window ${tab.windowId} is not the OS-focused window — trusted OS events are routed by the OS to whatever is frontmost, not to the target tab`,
+      data: { hint: FOREGROUND_HINT }
+    } }
+  }
+  return { ok: true, windowBounds: {
+    left: win.left || 0, top: win.top || 0,
+    width: win.width || 0, height: win.height || 0
+  } }
+}
+
 export async function handleOsInputActions(
   action: { type: string; [key: string]: unknown },
   tabId: number
 ): Promise<ActionResult> {
   switch (action.type) {
     case "os_click": {
-      const win = await chrome.windows.getCurrent()
-      const windowBounds = {
-        left: win.left || 0, top: win.top || 0,
-        width: win.width || 0, height: win.height || 0
-      }
+      const fg = await requireForegroundTab(tabId)
+      if (!fg.ok) return fg.result
+      const windowBounds = fg.windowBounds
       let pageX = action.x as number | undefined
       let pageY = action.y as number | undefined
 
@@ -48,23 +104,32 @@ export async function handleOsInputActions(
       }
     }
 
-    case "os_key":
+    case "os_key": {
+      // Keyboard CGEvents go to the focused app's key window; if the target
+      // tab isn't foreground the combo leaks into another app (issue #166).
+      const fg = await requireForegroundTab(tabId)
+      if (!fg.ok) return fg.result
       return { success: true, data: { method: "os_event", key: action.key, modifiers: action.modifiers || [] } }
+    }
 
     case "os_type": {
-      if (action.index !== undefined || action.ref) {
-        await sendToContentScript(tabId, { type: "focus", index: action.index, ref: action.ref })
+      const fg = await requireForegroundTab(tabId)
+      if (!fg.ok) return fg.result
+      if (action.index !== undefined || action.ref || action.sensitive === true) {
+        const focused = await sendToContentScript(tabId, {
+          type: "focus", index: action.index, ref: action.ref,
+          sensitive: action.sensitive, focused: action.index === undefined && !action.ref
+        }) as ActionResult
+        if (!focused.success) return focused
         await new Promise(r => setTimeout(r, 50))
       }
       return { success: true, data: { method: "os_event", text: action.text } }
     }
 
     case "os_move": {
-      const win = await chrome.windows.getCurrent()
-      const windowBounds = {
-        left: win.left || 0, top: win.top || 0,
-        width: win.width || 0, height: win.height || 0
-      }
+      const fg = await requireForegroundTab(tabId)
+      if (!fg.ok) return fg.result
+      const windowBounds = fg.windowBounds
       const chromeUiHeight = (action.chromeUiHeight as number) ||
         (88 + (debuggerAttached.has(tabId) ? 35 : 0))
       return {

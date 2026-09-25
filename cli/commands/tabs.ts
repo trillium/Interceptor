@@ -1,13 +1,13 @@
 /**
- * cli/commands/tabs.ts — tabs, tab new/close/switch/designate/self, window, frames, session
+ * cli/commands/tabs.ts — tabs, tab new/close/switch, window, frames, session
  *
  * Returns null for "session" subcommands (handled locally, no daemon needed).
  */
 
 import { unlinkSync } from "node:fs"
 import { writeFileSync } from "node:fs"
-import { getGlobalGroup, sendCommand } from "../transport"
-import { loadDesignatedTab, saveDesignatedTab } from "./session-tab"
+import { TEMP } from "../../shared/platform"
+import { buildTabCreateAction } from "./compound"
 
 type Action = { type: string; [key: string]: unknown }
 
@@ -29,17 +29,6 @@ function parseIntegerArg(label: string, raw: string | undefined): number {
     throw new Error(`${label} is outside the safe integer range`)
   }
   return value
-}
-
-/**
- * Resolve the top-level tab id for an outgoing action. An explicit numeric
- * target inside the action itself (e.g. `tab close <id>`, `tab switch <id>`)
- * wins over the designated-tab fallback: attaching a stale designated id
- * alongside it poisons the extension's group gate — a designated tab that has
- * since been closed made the gated action hang with no reply (robots-m0ay).
- */
-export function resolveEffectiveTabId(action: Action, designatedTabId: number | undefined): number | undefined {
-  return typeof action.tabId === "number" && Number.isInteger(action.tabId) ? action.tabId : designatedTabId
 }
 
 function parsePositiveIntegerArg(label: string, raw: string | undefined): number {
@@ -134,74 +123,7 @@ export function buildWindowResizeAction(args: string[]): Action {
   return action
 }
 
-/**
- * Resolve the tab `interceptor tab designate` should pin when called with no id:
- * the most recently opened interceptor-managed tab (highest tab id among the
- * interceptor group), falling back to the highest id overall if none are managed.
- */
-async function resolveMostRecentTab(contextId?: string): Promise<number | undefined> {
-  const resp = await sendCommand({ type: "tab_list" }, undefined, contextId)
-  const result = resp.result
-  if (!result.success) {
-    throw new Error(result.error || "failed to list tabs")
-  }
-  const tabs = (result.data as Array<{ id?: number; managed?: boolean }>) || []
-  const withIds = tabs.filter((t): t is { id: number; managed?: boolean } => typeof t.id === "number")
-  const pool = withIds.some(t => t.managed) ? withIds.filter(t => t.managed) : withIds
-  if (pool.length === 0) return undefined
-  return pool.reduce((a, b) => (b.id > a.id ? b : a)).id
-}
-
-/** Handle `interceptor tab designate [id]`: pin an explicit or resolved tab id as the session's working tab. */
-async function runTabDesignate(args: string[], jsonMode: boolean, contextId?: string): Promise<null> {
-  let tabId: number
-
-  if (args[0] && !args[0].startsWith("--")) {
-    try {
-      tabId = parsePositiveIntegerArg("tab id", args[0])
-    } catch {
-      die(`invalid tab id: ${args[0]}`)
-    }
-  } else {
-    let resolved: number | undefined
-    try {
-      resolved = await resolveMostRecentTab(contextId)
-    } catch (err) {
-      die((err as Error).message)
-    }
-    if (resolved === undefined) {
-      die("no tabs found to designate. Open one with 'interceptor open <url>' first.")
-    }
-    tabId = resolved
-  }
-
-  saveDesignatedTab(tabId, getGlobalGroup())
-
-  if (jsonMode) {
-    console.log(JSON.stringify({ tab_id: tabId, designated: true }))
-  } else {
-    console.log(`Designated tab ${tabId} as working tab`)
-  }
-  return null
-}
-
-/** Handle `interceptor tab self`: print the session's designated tab id, erroring if none is set. */
-function runTabSelf(jsonMode: boolean): null {
-  const tabId = loadDesignatedTab(getGlobalGroup())
-  if (tabId === undefined) {
-    console.error("error: No tab designated. Run `interceptor tab designate [id]` first.")
-    process.exit(1)
-  }
-  if (jsonMode) {
-    console.log(JSON.stringify({ tab_id: tabId }))
-  } else {
-    console.log(String(tabId))
-  }
-  return null
-}
-
-/** Parse `tabs`/`tab ...`/`window ...`/`frames`/`session`/`group`/`contexts` into a daemon action, or handle it locally and return null. */
-export async function parseTabsCommand(filtered: string[], jsonMode = false, contextId?: string): Promise<Action | null> {
+export async function parseTabsCommand(filtered: string[]): Promise<Action | null> {
   const cmd = filtered[0]
 
   switch (cmd) {
@@ -211,36 +133,66 @@ export async function parseTabsCommand(filtered: string[], jsonMode = false, con
     case "tab":
       switch (filtered[1]) {
         case "new": {
-          // Background-first by default; --activate is the opt-in.
-          const action: Action = { type: "tab_create", url: filtered[2] }
-          if (filtered.includes("--activate")) action.active = true
-          return action
+          // Background-first by default; --activate is the opt-in. Shares the
+          // open-verb parser so --reuse works here too (it was silently ignored
+          // before), but never sets policyDefault: `tab new` is
+          // the ⌘T verb and always creates unless --reuse is explicit.
+          return buildTabCreateAction(filtered, filtered[2])
         }
-        case "close":
-          return filtered[2]
-            ? { type: "tab_close", tabId: parseInt(filtered[2]) }
-            : { type: "tab_close" }
-        case "switch":
-          return { type: "tab_switch", tabId: parseInt(filtered[2]) }
-        case "designate":
-          return runTabDesignate(filtered.slice(2), jsonMode, contextId)
-        case "self":
-          return runTabSelf(jsonMode)
-        default:
-          // Shorthand: `interceptor tab <id>` targets a specific tab by
-          // switching focus to it (mirrors `tab switch <id>`).
-          if (filtered[1] && /^\d+$/.test(filtered[1])) {
-            return { type: "tab_switch", tabId: parseInt(filtered[1], 10) }
+        case "close": {
+          // The id is the first non-flag argument (`tab close --json` is a
+          // valid no-arg close). Strict digits beyond that: parseInt would
+          // partial-parse '12abc' to 12 and turn a typo'd id into a close of
+          // a different (or the active) tab.
+          const closeId = filtered.slice(2).find(a => !a.startsWith("-"))
+          if (closeId !== undefined && !/^\d+$/.test(closeId)) {
+            console.error(`error: tab close requires a numeric tab ID, got '${closeId}'`)
+            process.exit(1)
           }
-          console.error("error: unknown tab subcommand. Use: new, close, switch, designate, self")
+          return closeId
+            ? { type: "tab_close", tabId: parseInt(closeId) }
+            : { type: "tab_close" }
+        }
+        case "switch": {
+          const switchId = filtered.slice(2).find(a => !a.startsWith("-"))
+          if (switchId === undefined || !/^\d+$/.test(switchId)) {
+            console.error(`error: tab switch requires a numeric tab ID${switchId !== undefined ? `, got '${switchId}'` : ""}`)
+            process.exit(1)
+          }
+          return { type: "tab_switch", tabId: parseInt(switchId) }
+        }
+        case "keepalive": {
+          // Background-safe alternative to `tab switch` for a page that will
+          // not render while hidden. Explicit id only, same strictness
+          // as switch; `--off` clears the flag.
+          const keepId = filtered.slice(2).find(a => !a.startsWith("-"))
+          if (keepId === undefined || !/^\d+$/.test(keepId)) {
+            console.error(`error: tab keepalive requires a numeric tab ID${keepId !== undefined ? `, got '${keepId}'` : ""}`)
+            process.exit(1)
+          }
+          return { type: "tab_keepalive", tabId: parseInt(keepId), enabled: !filtered.includes("--off") }
+        }
+        default: {
+          // `tab list` was guessed 179 times in 90 agent sessions (2026-09-10
+          // review); the listing verb is `tabs`, so say so instead of only
+          // naming the real subcommands.
+          const sub = filtered[1]
+          const listHint = sub === "list" || sub === "ls" ? " To list tabs run 'interceptor tabs'." : " (to list tabs: 'interceptor tabs')"
+          console.error(`error: unknown tab subcommand${sub ? ` '${sub}'` : ""}. Use: new, close, switch, keepalive.${listHint}`)
           process.exit(1)
+        }
       }
       break
 
     case "window":
       switch (filtered[1]) {
-        case "new":
-          return { type: "window_create", url: filtered[2], incognito: filtered.includes("--incognito") }
+        case "new": {
+          // Background-first like `tab new`; `--activate` is the opt-in that
+          // sends focused: true. The url is the first non-flag
+          // argument so `window new --activate` never reads the flag as a url.
+          const url = filtered.slice(2).find(a => !a.startsWith("-"))
+          return { type: "window_create", url, incognito: filtered.includes("--incognito"), focused: filtered.includes("--activate") }
+        }
         case "close":
           return { type: "window_close", windowId: parseWindowIdForCli(filtered[2]) }
         case "focus":
@@ -261,7 +213,7 @@ export async function parseTabsCommand(filtered: string[], jsonMode = false, con
       return { type: "frames_list" }
 
     case "session": {
-      const sessionPath = "/tmp/interceptor-session.pid"
+      const sessionPath = `${TEMP}/interceptor-session.pid`
       if (filtered[1] === "start") {
         writeFileSync(sessionPath, `${process.pid}\n${Date.now()}`)
         console.log(`session started (pid: ${process.pid})`)

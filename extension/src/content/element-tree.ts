@@ -1,3 +1,4 @@
+import { safeValue } from "./sensitive"
 import { getEffectiveRole } from "./a11y-tree"
 import type { IndexedElement } from "./element-discovery"
 
@@ -42,13 +43,13 @@ export function getRelevantAttrs(el: Element): string {
     if (type) attrs.push(`type="${type}"`)
     const placeholder = el.getAttribute("placeholder")
     if (placeholder) attrs.push(`placeholder="${placeholder}"`)
-    const value = (el as HTMLInputElement).value
+    const value = safeValue(el)
     if (value) attrs.push(`value="${value.slice(0, 40)}"`)
     if ((el as HTMLInputElement).checked) attrs.push("checked")
     if ((el as HTMLInputElement).disabled) attrs.push("disabled")
   }
   if (tag === "select" || tag === "textarea") {
-    const value = (el as HTMLSelectElement | HTMLTextAreaElement).value
+    const value = safeValue(el)
     if (value) attrs.push(`value="${value.slice(0, 40)}"`)
   }
   if (tag === "img") {
@@ -94,6 +95,15 @@ const STYLE_BUNDLE_PROPS = [
   "cursor",
   "opacity"
 ] as const
+
+// `cursor` is an inherited CSS property: a passive descendant (a label span,
+// an icon) of a `cursor: pointer` container computes the same "pointer"
+// value as the container itself, purely via inheritance. Only treat pointer
+// as a genuine "this element is a clickable widget" signal when it isn't
+// just passed through from a `cursor: pointer` ancestor.
+export function hasOwnPointerCursor(cursor: string, parentCursor: string | null): boolean {
+  return cursor === "pointer" && parentCursor !== "pointer"
+}
 
 export function getStyleBundle(el: Element): string {
   const cs = getComputedStyle(el)

@@ -24,9 +24,11 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs"
 export const AFC_MAGIC = "CFA6LPAA"
 export const AFC_OP = {
   Status: 0x01, Data: 0x02, ReadDir: 0x03, MakeDir: 0x09,
-  FileOpen: 0x0d, FileWrite: 0x10, FileClose: 0x14, RemovePath: 0x08,
-  FileOpenResult: 0x0e,
+  FileOpen: 0x0d, FileRead: 0x0f, FileWrite: 0x10, FileClose: 0x14, RemovePath: 0x08,
+  FileOpenResult: 0x0e, GetFileInfo: 0x0a,
 } as const
+/** AFC file-open modes (libimobiledevice afc_file_mode_t). */
+export const AFC_MODE = { RdOnly: 1, WrOnly: 3 } as const
 
 const AFC_STATUS = {
   Success: 0,
@@ -204,9 +206,9 @@ class AfcClient {
     await this.removePath(path)
   }
 
-  async openFile(path: string): Promise<bigint> {
-    // AFC_FOPEN_WRONLY (3) creates/truncates files for developer package staging.
-    const mode = u64le(3)
+  async openFile(path: string, fileMode: number = AFC_MODE.WrOnly): Promise<bigint> {
+    // WrOnly (3) creates/truncates for staging; RdOnly (1) for pulls.
+    const mode = u64le(fileMode)
     const candidates = [
       Buffer.concat([mode, nulString(path)]),
       Buffer.concat([nulString(path), mode]),
@@ -238,10 +240,35 @@ class AfcClient {
     }
   }
 
+  /** Read a whole file off the device (pull). RdOnly open → FileRead loop → close. */
+  async readFile(path: string, maxBytes = 64 * 1024 * 1024): Promise<AnyBuffer> {
+    const handle = await this.openFile(path, AFC_MODE.RdOnly)
+    const chunks: AnyBuffer[] = []
+    let total = 0
+    try {
+      for (;;) {
+        const want = 1 << 20 // 1 MiB per read
+        const r = await this.request(AFC_OP.FileRead, Buffer.concat([u64le(handle), u64le(want)]), Buffer.alloc(0), 60_000)
+        const bytes = Buffer.concat([r.payload, r.data])
+        if (bytes.length === 0) break
+        total += bytes.length
+        if (total > maxBytes) throw new Error(`AFC read exceeded ${maxBytes}-byte cap for ${path}`)
+        chunks.push(bytes)
+        if (bytes.length < want) break // short read ⇒ EOF
+      }
+    } finally {
+      await this.request(AFC_OP.FileClose, u64le(handle)).catch(() => {})
+    }
+    return Buffer.concat(chunks)
+  }
+
   close(): void {
     try { this.sock.destroy() } catch {}
   }
 }
+
+export { AfcClient, AfcStatusError }
+export type { AfcResponse }
 
 /** One framed installation_proxy exchange that streams responses until Status:Complete. */
 function browseInstallProxy(sock: Socket | TLSSocket, req: PlistDict, timeoutMs = 20_000): Promise<Record<string, unknown>[]> {

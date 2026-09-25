@@ -1,19 +1,22 @@
 /**
  * cli/commands/meta.ts — status, reload, meta, links, images, forms, info, query, exists, count,
- *                        table, attr, style, events, search, notify, sessions, capabilities,
+ *                        table, attr, style, events, notify, sessions, capabilities,
  *                        modals, panels
  *
  * Returns null for "status" and "events" (handled locally, no daemon connection needed).
  */
 
 import { existsSync, readFileSync } from "node:fs"
+import { EVENTS_PATH } from "../../shared/platform"
 import { parseElementTarget } from "../parse"
 import {
   readStatusSnapshot,
   detectConfiguredBrowsers,
   detectMacOSDefaultBrowser,
+  describeEvalMain,
   formatStatus,
   snapshotToJson,
+  type ContextStatus,
   type StatusSnapshot,
 } from "../lib/status-renderer"
 import { sendCommand } from "../transport"
@@ -26,10 +29,10 @@ type Action = { type: string; [key: string]: unknown }
  * interceptor-group tab. Probe is skipped silently when the daemon isn't
  * running, so `status` stays a true local-pre-spawn check by default.
  */
-async function probeExtensionReachability(): Promise<{ reachable: boolean; reason?: string }> {
+async function probeExtensionReachability(contextId?: string): Promise<{ reachable: boolean; reason?: string }> {
   try {
     const resp = await Promise.race([
-      sendCommand({ type: "tab_list" }, undefined),
+      sendCommand({ type: "tab_list" }, undefined, contextId),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("probe timed out after 2s")), 2000)
       ),
@@ -48,7 +51,50 @@ async function probeExtensionReachability(): Promise<{ reachable: boolean; reaso
   }
 }
 
-export async function parseMetaCommand(filtered: string[], jsonMode = false): Promise<Action | null> {
+type ContextEntry = { contextId: string; kind?: string; version?: string; extensionId?: string; installType?: string }
+
+/** Every connected context (daemon-local `contexts --verbose`), 2s-bounded. */
+async function listContexts(): Promise<ContextEntry[]> {
+  try {
+    const resp = await Promise.race([
+      sendCommand({ type: "contexts", verbose: true }, undefined, undefined),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("contexts probe timed out after 2s")), 2000)),
+    ])
+    const data = resp.result?.data
+    if (!Array.isArray(data)) return []
+    return data.map(e => typeof e === "string" ? { contextId: e, kind: "extension" } : e as ContextEntry)
+  } catch {
+    return []
+  }
+}
+
+/** Probe one context: reachability plus page-world eval availability. */
+async function probeContextStatus(entry: ContextEntry): Promise<ContextStatus> {
+  const base: ContextStatus = {
+    contextId: entry.contextId,
+    kind: entry.kind ?? "extension",
+    version: entry.version,
+    installType: entry.installType,
+    extensionId: entry.extensionId,
+    reachable: false,
+  }
+  if (base.kind !== "extension") return { ...base, reachable: true }
+  const [probe, caps] = await Promise.all([
+    probeExtensionReachability(entry.contextId),
+    Promise.race([
+      sendCommand({ type: "capabilities" }, undefined, entry.contextId),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("capabilities probe timed out after 2s")), 2000)),
+    ]).then(r => (r.result?.success ? r.result.data : undefined)).catch(() => undefined),
+  ])
+  return {
+    ...base,
+    reachable: probe.reachable,
+    reason: probe.reason,
+    evalMain: caps === undefined ? undefined : describeEvalMain(caps, entry.extensionId),
+  }
+}
+
+export async function parseMetaCommand(filtered: string[], jsonMode = false, contextId?: string): Promise<Action | null> {
   const cmd = filtered[0]
 
   switch (cmd) {
@@ -76,8 +122,37 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false): Pr
       // Extension-reachability probe (#49) — verbose-only, daemon-alive-only.
       // Stays a true local-pre-spawn check otherwise.
       if (verbose && snap.daemon) {
-        const probe = await probeExtensionReachability()
-        snap.extension = { probed: true, ...probe }
+        // Probe every connected context (or just the resolved one) instead of
+        // sending one unscoped probe that the daemon refuses when several
+        // browser profiles are connected.
+        const all = await listContexts()
+        const targets = contextId ? all.filter(c => c.contextId === contextId) : all
+        if (targets.length > 0) {
+          snap.contexts = await Promise.all(targets.map(probeContextStatus))
+          // The aggregate line follows a reachable extension when there is one,
+          // so an unreachable profile listed first does not hide a working one.
+          const extensions = snap.contexts.filter(c => c.kind === "extension")
+          const first = extensions.find(c => c.reachable) ?? extensions[0] ?? snap.contexts[0]
+          snap.extension = { probed: true, reachable: first.reachable, reason: first.reason }
+        } else {
+          const probe = await probeExtensionReachability(contextId)
+          snap.extension = { probed: true, ...probe }
+        }
+        // Surface the extension-resolved tab-lifecycle policy so agents
+        // can observe the reuse/idle-close behavior. Best-effort, 2s-bounded.
+        const lifecycleContext = contextId ?? (snap.contexts?.find(c => c.kind === "extension" && c.reachable)?.contextId)
+        if (snap.extension.reachable && (lifecycleContext || (snap.contexts?.length ?? 0) <= 1)) {
+          try {
+            const resp = await Promise.race([
+              sendCommand({ type: "status" }, undefined, lifecycleContext),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("status probe timed out after 2s")), 2000)
+              ),
+            ])
+            const data = resp.result?.data as { tabLifecycle?: StatusSnapshot["tabLifecycle"] } | undefined
+            if (data?.tabLifecycle) snap.tabLifecycle = data.tabLifecycle
+          } catch {}
+        }
       } else if (verbose && !snap.daemon) {
         snap.extension = { probed: false, reachable: false, reason: "daemon not running" }
       }
@@ -91,7 +166,7 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false): Pr
     }
 
     case "events": {
-      const eventsPath = "/tmp/interceptor-events.jsonl"
+      const eventsPath = EVENTS_PATH
       if (!existsSync(eventsPath)) {
         console.log("no events yet")
         return null
@@ -192,17 +267,27 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false): Pr
       return { type: "style_get", ...parseElementTarget(filtered[1]), property: filtered[2] }
     }
 
-    case "search":
-      return { type: "search_query", query: filtered.slice(1).join(" ") }
-
     case "notify":
       return { type: "notification_create", title: filtered[1], message: filtered.slice(2).join(" ") }
 
     case "sessions":
       if (filtered[1] === "restore") {
-        return { type: "session_restore", sessionId: filtered[2] }
+        // First non-flag argument (previously `filtered[2]`, which swallowed
+        // flags — `sessions restore --json` sent "--json" as the sessionId).
+        const sessionId = filtered.slice(2).find(a => !a.startsWith("-"))
+        // No-arg restore is deliberately refused: Chrome restores "whatever
+        // closed most recently", which can be the user's own window. An undo
+        // must name its target.
+        if (!sessionId) {
+          console.error("error: sessions restore requires a <sessionId> — run 'interceptor sessions' to list recently closed tabs/windows. (No-arg restore is disabled: it reopens whatever closed most recently, which may be the user's own window.)")
+          process.exit(1)
+        }
+        // Default reopens in the background; --activate asks for the browser's own
+        // restore, which brings the restored tab to the front.
+        return { type: "session_restore", sessionId, ...(filtered.includes("--activate") ? { active: true } : {}) }
       } else {
-        return { type: "session_list", maxResults: filtered[1] ? parseInt(filtered[1]) : 10 }
+        const max = filtered.slice(1).find(a => !a.startsWith("-"))
+        return { type: "session_list", maxResults: max ? parseInt(max) : 10 }
       }
 
     case "capabilities":

@@ -73,7 +73,8 @@ browser_installed() {
     Darwin:chrome-for-testing) [[ -d "/Applications/Google Chrome for Testing.app" ]]  && echo 1 || echo 0 ;;
     Darwin:edge)               [[ -d "/Applications/Microsoft Edge.app" ]]             && echo 1 || echo 0 ;;
     Darwin:vivaldi)            [[ -d "/Applications/Vivaldi.app" ]]                    && echo 1 || echo 0 ;;
-    Linux:brave)    command -v brave-browser >/dev/null 2>&1 && echo 1 || echo 0 ;;
+    Linux:brave)    ( command -v brave-browser >/dev/null 2>&1 \
+                  || command -v brave >/dev/null 2>&1 ) && echo 1 || echo 0 ;;
     Linux:chrome)   ( command -v google-chrome >/dev/null 2>&1 \
                   || command -v google-chrome-stable >/dev/null 2>&1 ) && echo 1 || echo 0 ;;
     *) echo 0 ;;
@@ -96,6 +97,7 @@ browser_bin_for() {
     Darwin:vivaldi)            echo "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi" ;;
     Linux:brave)
       if command -v brave-browser >/dev/null 2>&1; then echo brave-browser
+      elif command -v brave >/dev/null 2>&1; then echo brave
       else return 1; fi
       ;;
     Linux:chrome)
@@ -105,6 +107,29 @@ browser_bin_for() {
       ;;
     *) return 1 ;;
   esac
+}
+
+# Is the target browser running? On Darwin BROWSER_BIN is the .app binary path,
+# which never appears in this script's own argv. On Linux it is a bare name
+# (brave, google-chrome) that DOES — `bash install.sh --brave` — so a plain
+# `pgrep -f` on that bare name matched the installer itself: every "is the browser
+# running" check answered yes, and the "force restart" pkill signalled the
+# script (issue #172). Anchor the Linux match to argv[0] so only a process
+# launched as the browser counts. Distro wrapper scripts `exec -a "$0"` the
+# real binary, so the wrapper name stays in argv[0]; the name is a prefix match
+# so google-chrome also covers google-chrome-stable.
+browser_pgrep_pattern() {
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    printf '%s' "$1"
+  else
+    printf '^([^ ]*/)?%s' "$1"
+  fi
+}
+browser_running() {
+  pgrep -f "$(browser_pgrep_pattern "$1")" >/dev/null 2>&1
+}
+kill_browser() {
+  pkill -TERM -f "$(browser_pgrep_pattern "$1")" 2>/dev/null || true
 }
 
 # ── Parse flags ────────────────────────────────────────────────────────────────
@@ -428,7 +453,7 @@ PY
 write_developer_mode_true() {
   local prefs="$1" browser_bin="$2"
   if [[ ! -f "$prefs" ]]; then return 1; fi
-  if pgrep -f "$browser_bin" >/dev/null 2>&1; then return 2; fi
+  if browser_running "$browser_bin"; then return 2; fi
   python3 - "$prefs" <<'PY' 2>/dev/null || return 3
 import json, sys, os, tempfile
 path = sys.argv[1]
@@ -561,7 +586,7 @@ load_extension() {
     # AND we have a Preferences file to write to. Editing while the browser
     # runs is unsafe — the browser overwrites on shutdown.
     local CAN_AUTO=0
-    if [[ -f "$PREFS_PATH" ]] && ! pgrep -f "$BROWSER_BIN" >/dev/null 2>&1; then
+    if [[ -f "$PREFS_PATH" ]] && ! browser_running "$BROWSER_BIN"; then
       CAN_AUTO=1
     fi
 
@@ -593,7 +618,7 @@ load_extension() {
 
   # Check if browser is already running
   local BROWSER_RUNNING=0
-  if pgrep -f "$BROWSER_BIN" >/dev/null 2>&1; then
+  if browser_running "$BROWSER_BIN"; then
     BROWSER_RUNNING=1
   fi
 
@@ -617,11 +642,11 @@ load_extension() {
         osascript -e "tell application \"$BROWSER_NAME Browser\" to quit" 2>/dev/null || \
         osascript -e "tell application \"$BROWSER_NAME\" to quit" 2>/dev/null || true
       else
-        pkill -TERM -f "$BROWSER_BIN" 2>/dev/null || true
+        kill_browser "$BROWSER_BIN"
       fi
       sleep 2
       for j in {1..10}; do
-        if ! pgrep -f "$BROWSER_BIN" >/dev/null 2>&1; then break; fi
+        if ! browser_running "$BROWSER_BIN"; then break; fi
         sleep 1
       done
     else
@@ -645,8 +670,9 @@ load_extension() {
     esac
     echo ""
     echo "==> $BROWSER_NAME ignores --load-extension in branded desktop builds."
-    echo "    Use one of these paths instead:"
-    echo "      1. Developer flow: open ${SCHEMA}://extensions, enable Developer Mode,"
+    echo "    Install the extension one of these ways (both share one extension ID):"
+    echo "      1. Chrome Web Store: https://chromewebstore.google.com/detail/interceptor/gomcpnagjjlhehnkoobkjgnkbleiooed"
+    echo "      2. Developer flow: open ${SCHEMA}://extensions, enable Developer Mode,"
     echo "         then Load unpacked -> $EXTENSION_DIR"
     echo ""
     echo "    Native messaging metadata has already been installed."
@@ -688,7 +714,7 @@ load_extension() {
 
   if [[ "$probed" == "1" ]]; then
     echo "==> Extension loaded into $BROWSER_NAME and reachable."
-    echo "    Extension ID: hkjbaciefhhgekldhncknbjkofbpenng"
+    echo "    Extension ID: gomcpnagjjlhehnkoobkjgnkbleiooed (same as the Chrome Web Store listing)"
     [[ -n "$PROFILE" ]] && echo "    Profile: $PROFILE"
   else
     echo "==> WARNING: $BROWSER_NAME launched, but the extension is NOT reachable after 8s."
@@ -704,7 +730,7 @@ load_extension() {
       vivaldi)                                                               echo "      1. Open vivaldi://extensions/" ;;
     esac
     echo "      2. Confirm Developer mode is ON (top-right toggle)."
-    echo "      3. Confirm 'Interceptor' appears with ID hkjbaciefhhgekldhncknbjkofbpenng."
+    echo "      3. Confirm 'Interceptor' appears with ID gomcpnagjjlhehnkoobkjgnkbleiooed."
     echo "      4. If the extension is missing, click 'Load unpacked' and select:"
     echo "         $EXTENSION_DIR"
     echo ""

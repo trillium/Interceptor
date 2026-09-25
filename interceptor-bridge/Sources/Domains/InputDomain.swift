@@ -10,6 +10,9 @@ enum InputError: Error {
 final class InputDomain: DomainHandler, @unchecked Sendable {
     private let refRegistry: RefRegistry
     private let selector: InputTargetSelector
+    // AX press / value-set / role-probe / center-point reads
+    // route through the transport + codec (removes `posValue as! AXValue`).
+    private let transport: any AXTransport = LiveAXTransport()
 
     init(refRegistry: RefRegistry = .shared) {
         self.refRegistry = refRegistry
@@ -55,10 +58,31 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         return selector.resolveTargetPid(ref: ref, appName: appName, pid: pid)
     }
 
+    // Refuse before posting anything when the caller named a target that
+    // cannot be honored: an expired ref, an app that is not running, or a ref
+    // whose owner is not the requested app. Every input verb checks this first
+    // so a failed explicit target never becomes an implicit frontmost target.
+    private func explicitTargetProblem(_ action: [String: Any]) -> String? {
+        let appName = action["app"] as? String
+        let pid: pid_t? = (action["pid"] as? Int).map { pid_t($0) } ?? (action["pid"] as? pid_t)
+        // Every ref the action names must resolve and belong to the explicit
+        // app/pid: "ref" for click/type/keys/scroll, "from"/"to" for drag.
+        let refs = ["ref", "from", "to"].compactMap { action[$0] as? String }.filter { !$0.isEmpty }
+        if refs.isEmpty { return selector.explicitTargetProblem(ref: nil, appName: appName, pid: pid) }
+        for ref in refs {
+            if let problem = selector.explicitTargetProblem(ref: ref, appName: appName, pid: pid) { return problem }
+        }
+        return nil
+    }
+
     // Posts a single CGEvent through the right layer for the resolved
     // target. Centralizes the post-tap vs post-to-pid choice so every
     // verb can stay short and consistent.
     private func post(_ event: CGEvent, on target: InputTarget) {
+        Self.postEvent(event, on: target)
+    }
+
+    static func postEvent(_ event: CGEvent, on target: InputTarget) {
         switch target {
         case .axPress:
             // AX press doesn't post events; callers handle that path
@@ -71,6 +95,28 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         }
     }
 
+    /// Posts `text` as unicode keystrokes, one key-down/up pair per character,
+    /// through `target`. Shared with AuthDialogDomain (issue #244) so the admin
+    /// prompt gets exactly the delivery `type` uses. False when no event
+    /// source could be created.
+    static func postUnicodeKeystrokes(_ text: String, to target: InputTarget) -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
+        for char in text {
+            let utf16 = Array(String(char).utf16)
+            if let downEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
+                downEvent.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+                postEvent(downEvent, on: target)
+            }
+            usleep(3000)
+            if let upEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
+                upEvent.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+                postEvent(upEvent, on: target)
+            }
+            usleep(8000)
+        }
+        return true
+    }
+
     // MARK: - Click
 
     private func handleClick(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -78,13 +124,17 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         let right = action["right"] as? Bool ?? false
         let clickCount = double ? 2 : 1
 
+        if let problem = explicitTargetProblem(action) {
+            completion(WireFormat.error(problem))
+            return
+        }
         let target = selectTarget(action)
 
         // Pure AX press — only for plain single left clicks against a ref.
         // AX press doesn't model double-click or right-click semantics;
         // those keep going through synthesized CGEvents.
         if case .axPress(let element) = target, !double, !right {
-            let err = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            let err = transport.performAction(element, kAXPressAction as String)
             if err == .success {
                 completion(WireFormat.success("ax-pressed ref"))
                 return
@@ -161,6 +211,10 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             completion(WireFormat.error("type requires text"))
             return
         }
+        if let problem = explicitTargetProblem(action) {
+            completion(WireFormat.error(problem))
+            return
+        }
 
         // AX-first path: when a ref points to a text-bearing element,
         // try AXUIElementSetAttributeValue(kAXValueAttribute, text).
@@ -168,8 +222,8 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         // Apple documents this as the supported way to programmatically
         // populate text fields.
         if let ref = action["ref"] as? String, let element = refRegistry.resolve(ref) {
-            if Self.isTextRole(element) {
-                let err = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
+            if isTextRole(element) {
+                let err = transport.setAttributeValue(element, kAXValueAttribute as String, text as CFString)
                 if err == .success {
                     completion(WireFormat.success("ax-set value (\(text.count) chars)"))
                     return
@@ -181,13 +235,8 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             }
             // Focus the element first so synthesized keys land in it,
             // even though the app stays in the background.
-            AXUIElementPerformAction(element, kAXPressAction as CFString)
+            _ = transport.performAction(element, kAXPressAction as String)
             usleep(100_000)
-        }
-
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            completion(WireFormat.error("failed to create event source"))
-            return
         }
 
         // Pick a delivery target for synthesized key events: prefer
@@ -200,19 +249,10 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             postTarget = .cghidEventTap
         }
 
-        DispatchQueue.global().async { [self] in
-            for char in text {
-                let utf16 = Array(String(char).utf16)
-                if let downEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                    downEvent.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-                    post(downEvent, on: postTarget)
-                }
-                usleep(3000)
-                if let upEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                    upEvent.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-                    post(upEvent, on: postTarget)
-                }
-                usleep(8000)
+        DispatchQueue.global().async {
+            guard Self.postUnicodeKeystrokes(text, to: postTarget) else {
+                completion(WireFormat.error("failed to create event source"))
+                return
             }
             let routing: String
             switch postTarget {
@@ -227,10 +267,9 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     // Roles that we accept programmatic value-set on. These are the
     // standard text-bearing AX roles per Apple's accessibility
     // documentation.
-    private static func isTextRole(_ element: AXUIElement) -> Bool {
-        var role: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              let r = role as? String else {
+    private func isTextRole(_ element: AXUIElement) -> Bool {
+        let (result, role) = transport.copyAttributeValue(element, kAXRoleAttribute as String)
+        guard result == .success, let r = AXValueCodec.displayString(role) else {
             return false
         }
         switch r {
@@ -288,6 +327,10 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
+        if let problem = explicitTargetProblem(action) {
+            completion(WireFormat.error(problem))
+            return
+        }
         // Same routing rule as click/type: ref → owning PID, else
         // explicit pid/app, else cghidEventTap.
         let postTarget: InputTarget
@@ -349,6 +392,10 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         let amount = action["amount"] as? Int32 ?? 300
         let times = max(1, action["times"] as? Int ?? 1)
         let intervalMs = max(0, action["intervalMs"] as? Int ?? 50)
+        if let problem = explicitTargetProblem(action) {
+            completion(WireFormat.error(problem))
+            return
+        }
         // Prefer ref-resolved owning PID, then explicit --pid, then
         // --app name lookup. Same precedence as click/type/keys.
         let pidFromAction = targetPid(action)
@@ -403,6 +450,10 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     // MARK: - Drag
 
     private func handleDrag(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        if let problem = explicitTargetProblem(action) {
+            completion(WireFormat.error(problem))
+            return
+        }
         let postTarget: InputTarget
         if let pid = targetPid(action) {
             postTarget = .postToPid(pid)
@@ -528,18 +579,13 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     }
 
     private func centerPoint(of element: AXUIElement) -> CGPoint? {
-        var posValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posValue) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+        let (posResult, posValue) = transport.copyAttributeValue(element, kAXPositionAttribute as String)
+        let (sizeResult, sizeValue) = transport.copyAttributeValue(element, kAXSizeAttribute as String)
+        guard posResult == .success, sizeResult == .success,
+              let position = AXValueCodec.point(from: posValue),
+              let size = AXValueCodec.size(from: sizeValue) else {
             return nil
         }
-
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(posValue as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
-
         return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
     }
 }

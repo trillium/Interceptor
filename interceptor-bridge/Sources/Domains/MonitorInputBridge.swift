@@ -29,6 +29,8 @@ final class MonitorInputBridge: @unchecked Sendable {
     typealias EventCallback = (_ event: String, _ data: [String: Any]) -> Void
 
     private let lock = NSLock()
+    // the hit-test + attribute reads route through the transport.
+    private let transport: any AXTransport = LiveAXTransport()
     private var monitors: [Any] = []
     private var callback: EventCallback?
     private var includeMouseMoved = false
@@ -148,7 +150,7 @@ final class MonitorInputBridge: @unchecked Sendable {
     private func handle(_ event: NSEvent) {
         guard let cb = (lock.withLock { self.callback }) else { return }
 
-        let frontmost = NSWorkspace.shared.frontmostApplication
+        let frontmost = FrontmostResolver.frontmostApplication(transport: transport)
         var data: [String: Any] = [
             "tr": true,
             "app": frontmost?.localizedName ?? "",
@@ -217,20 +219,16 @@ final class MonitorInputBridge: @unchecked Sendable {
     }
 
     private func hitTest(at point: CGPoint, pid: pid_t, into data: inout [String: Any]) {
-        let axApp = AXUIElementCreateApplication(pid)
-        var element: AXUIElement?
-        let status = AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &element)
+        let axApp = transport.createApplication(pid: pid)
+        let (status, element) = transport.copyElementAtPosition(axApp, x: Float(point.x), y: Float(point.y))
         guard status == .success, let el = element else { return }
 
-        var role: CFTypeRef?
-        var title: CFTypeRef?
-        var desc: CFTypeRef?
-        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
-        AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &title)
-        AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &desc)
-        if let r = role as? String { data["r"] = r }
-        if let t = title as? String { data["n"] = t }
-        else if let d = desc as? String { data["n"] = d }
+        let (_, role) = transport.copyAttributeValue(el, kAXRoleAttribute as String)
+        let (_, title) = transport.copyAttributeValue(el, kAXTitleAttribute as String)
+        let (_, desc) = transport.copyAttributeValue(el, kAXDescriptionAttribute as String)
+        if let r = AXValueCodec.displayString(role) { data["r"] = r }
+        if let t = AXValueCodec.displayString(title) { data["n"] = t }
+        else if let d = AXValueCodec.displayString(desc) { data["n"] = d }
     }
 
     static func keyComboString(_ event: NSEvent) -> String {

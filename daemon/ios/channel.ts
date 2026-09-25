@@ -19,6 +19,10 @@ import { IOS_RUNNER_OPS } from "../../shared/ios-device"
 
 export type IosWindowSize = { x: number; y: number; width: number; height: number }
 
+/** One finger of a multi-touch gesture: samples in screen points, `t` in milliseconds. */
+export type GestureSample = { x: number; y: number; t: number }
+export type GestureFinger = GestureSample[]
+
 /** The device transport contract the manager's verb handlers depend on. */
 export interface IosDeviceChannel {
   /** Liveness probe. Resolves when the device channel is reachable. */
@@ -34,8 +38,9 @@ export interface IosDeviceChannel {
   screenshot(): Promise<string>
   tap(x: number, y: number): Promise<void>
   drag(fromX: number, fromY: number, toX: number, toY: number, durationSec?: number): Promise<void>
-  sendKeys(text: string): Promise<void>
-  pressButton(name: string): Promise<void>
+  /** Type into the foreground app, or into `bundleId` (e.g. SpringBoard for a passcode sheet). */
+  sendKeys(text: string, bundleId?: string): Promise<void>
+  pressButton(name: string): Promise<unknown>
   launchApp(bundleId: string): Promise<void>
   activateApp(bundleId: string): Promise<void>
   terminateApp(bundleId: string): Promise<void>
@@ -88,13 +93,23 @@ export class RunnerChannel implements IosDeviceChannel {
     else p.reject(new Error(result?.error || "ios runner op failed"))
   }
 
-  /** Reject all in-flight ops (runner disconnected / context torn down). */
-  teardown(): void {
+  /** Reject every in-flight op (their replies died with the socket) but keep the channel usable. */
+  failInflight(reason = "ios runner disconnected"): void {
     for (const p of this.pending.values()) {
       clearTimeout(p.timer)
-      p.reject(new Error("ios runner disconnected"))
+      p.reject(new Error(reason))
     }
     this.pending.clear()
+  }
+
+  /** Point future ops at the socket a re-dialing runner registered on (same runner, same token). */
+  rebind(ws: RunnerSocket): void {
+    this.ws = ws
+  }
+
+  /** Reject all in-flight ops (runner disconnected / context torn down). */
+  teardown(): void {
+    this.failInflight()
     try { this.ws.close?.() } catch {}
   }
 
@@ -127,9 +142,19 @@ export class RunnerChannel implements IosDeviceChannel {
     await this.send(IOS_RUNNER_OPS.drag, { fromX, fromY, toX, toY, duration: durationSec })
   }
 
-  async sendKeys(text: string): Promise<void> { await this.send(IOS_RUNNER_OPS.keys, { text }) }
+  async sendKeys(text: string, bundleId?: string): Promise<void> { await this.send(IOS_RUNNER_OPS.keys, bundleId ? { text, bundleId } : { text }) }
+  /** issue #244: lock-screen passcode entry (see the runner's `unlock` op). */
+  async unlock(passcode?: string, probe = false): Promise<unknown> { return this.send(IOS_RUNNER_OPS.unlock, { passcode: passcode ?? "", probe }) }
 
-  async pressButton(name: string): Promise<void> { await this.send(IOS_RUNNER_OPS.press, { name }) }
+  async pressButton(name: string): Promise<unknown> { return this.send(IOS_RUNNER_OPS.press, { name }) }
+
+  /** One multi-touch record: `fingers` is [[{x, y, t}]] with t in ms from the record start. */
+  async gesture(fingers: GestureFinger[]): Promise<unknown> { return this.send(IOS_RUNNER_OPS.gesture, { fingers }) }
+
+  /** Frame push loop on the runner: start (fps, scale, quality), stop, or status. Returns the runner-side stats. */
+  async stream(action: "start" | "stop" | "status", opts: { fps?: number; scale?: number; quality?: number } = {}): Promise<unknown> {
+    return this.send(IOS_RUNNER_OPS.stream, { action, ...opts })
+  }
 
   /** Diagnostic passthrough for an arbitrary runner op (e.g. "fgdebug"). */
   async rawOp(op: string, args: Record<string, unknown> = {}): Promise<unknown> { return this.send(op, args) }

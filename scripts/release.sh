@@ -29,10 +29,9 @@
 #   10. Round 2 notarize each signed pkg.
 #   11. Staple each pkg.
 #   12. Verify with stapler validate, pkgutil --check-signature, spctl --assess.
-#   13. Sparkle appcast publish: copy + sign each pkg, emit per-pkg appcast item
-#       (with sparkle:channel set to "browser-only" or "full" so client-side
-#       updaters can filter by the mode the install reported via interceptor
-#       status).
+#   13. Stop before Sparkle publication. After local validation, the separate
+#       publisher validates docs/release-notes.html, signs an immutable notes
+#       snapshot, and emits per-mode appcast items.
 #
 # Env overrides (sensible defaults assume Hacker Valley Media's HVM team):
 #   INTERCEPTOR_SIGNING_IDENTITY    Developer ID Application name
@@ -65,6 +64,7 @@ DIST_XML_FULL="$REPO_ROOT/scripts/release/distribution.xml"
 DIST_XML_BROWSER="$REPO_ROOT/scripts/release/distribution-browser.xml"
 POSTINSTALL_FULL="$REPO_ROOT/scripts/release/postinstall-full"
 POSTINSTALL_BROWSER="$REPO_ROOT/scripts/release/postinstall-browser"
+PREINSTALL_EXTENSION_STORE="$REPO_ROOT/scripts/release/preinstall-extension-store"
 ENABLE_PLATFORM_TARGETS="${INTERCEPTOR_ENABLE_PLATFORM_TARGETS:-0}"
 INCLUDE_AGENT_DYLIBS="${INTERCEPTOR_INCLUDE_AGENT_DYLIBS:-0}"
 # When 1, a stapler failure is non-fatal: the artifact is still signed +
@@ -259,6 +259,10 @@ if [[ "$BUILD_BROWSER" == "1" && ! -x "$POSTINSTALL_BROWSER" ]]; then
   echo "ERROR: postinstall-browser script missing or not executable: $POSTINSTALL_BROWSER" >&2
   exit 1
 fi
+if [[ ! -x "$PREINSTALL_EXTENSION_STORE" ]]; then
+  echo "ERROR: preinstall extension Store script missing or not executable: $PREINSTALL_EXTENSION_STORE" >&2
+  exit 1
+fi
 
 echo "    Version:           $VERSION"
 echo "    Modes:             ${MODES[*]}"
@@ -335,7 +339,15 @@ echo ""
 # ── Step 4: Stage payload tree ────────────────────────────────────────────────
 echo "==> Step 4: Staging payload tree under dist/release/staging/"
 
-run rm -rf "$RELEASE_DIR"
+run mkdir -p "$RELEASE_DIR"
+run rm -rf "$STAGING_DIR" "$COMPONENTS_DIR" "$SCRIPTS_BROWSER_DIR" "$SCRIPTS_FULL_DIR"
+run rm -f "$PAYLOAD_ZIP"
+if [[ "$BUILD_BROWSER" == "1" ]]; then
+  run rm -f "$UNSIGNED_BROWSER_PKG" "$SIGNED_BROWSER_PKG"
+fi
+if [[ "$BUILD_FULL" == "1" ]]; then
+  run rm -f "$UNSIGNED_FULL_PKG" "$SIGNED_FULL_PKG"
+fi
 run mkdir -p "$STAGING_DIR/cli/$DEST_CLI_DIR"
 run mkdir -p "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR"
 run mkdir -p "$STAGING_DIR/extension/$DEST_EXTENSION_DIR"
@@ -384,30 +396,49 @@ run ditto "$REPO_ROOT/ios/InterceptorRunner/project.yml" "$STAGING_DIR/daemon/$D
 run ditto "$REPO_ROOT/ios/InterceptorRunner/README.md" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/README.md"
 
 # ── iOS agent: pre-built, UNSIGNED XCUITest runner ─────────
-# Build the iPhone agent ONCE per release and bundle it as an opaque tar. Ship it UNSIGNED — each user re-signs it with THEIR OWN Apple ID at
-# `interceptor ios setup` (daemon/ios/signer.ts), so the pkg carries no operator
-# development identity. The tar keeps the iOS binaries away from the macOS notary.
+# Build the iPhone agent once per release and bundle it as an opaque tar. Ship it
+# unsigned as a build input; `interceptor ios setup` rebuilds and signs the
+# packaged source project with the user's Xcode team. Direct install refuses this
+# unsigned artifact. The tar keeps iOS binaries away from the macOS notary.
 # Skip with INTERCEPTOR_SKIP_RUNNER=1; bundle a prebuilt Products dir with
 # INTERCEPTOR_RUNNER_PREBUILT=<dir>. (Operator machines with Xcode can still push
-# the prebuilt via devicectl; the re-sign only kicks in on the self-service path.)
+# a prepared product through the explicit setup path.)
 if [[ "${INTERCEPTOR_SKIP_RUNNER:-0}" != "1" ]]; then
   RUNNER_PRODUCTS="${INTERCEPTOR_RUNNER_PREBUILT:-}"
+  if [[ -n "$RUNNER_PRODUCTS" && ! -d "$RUNNER_PRODUCTS" ]]; then
+    echo "ERROR: INTERCEPTOR_RUNNER_PREBUILT is not a directory: $RUNNER_PRODUCTS" >&2
+    exit 1
+  fi
   if [[ -z "$RUNNER_PRODUCTS" && "${INTERCEPTOR_DRY_RUN:-0}" != "1" ]]; then
     echo "==> Building the iOS agent UNSIGNED (InterceptorRunner; user re-signs at setup)..."
     ( cd "$REPO_ROOT/ios/InterceptorRunner" && xcodegen generate >/dev/null )
     RUNNER_DD="$(mktemp -d)/dd"
     # Unsigned build-for-testing: no team, no identity, no provisioning. The
     # re-sign at `ios setup` supplies get-task-allow + the user's cert/profile.
+    PUBLIC_SOURCE_ROOT="/src/interceptor"
     xcrun xcodebuild build-for-testing \
       -project "$REPO_ROOT/ios/InterceptorRunner/InterceptorRunner.xcodeproj" \
       -scheme InterceptorRunner -destination 'generic/platform=iOS' \
       CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" ENTITLEMENTS_REQUIRED=NO \
+      "OTHER_CFLAGS=\"-ffile-prefix-map=$REPO_ROOT=$PUBLIC_SOURCE_ROOT\" \"-fdebug-prefix-map=$REPO_ROOT=$PUBLIC_SOURCE_ROOT\" \"-ffile-compilation-dir=$PUBLIC_SOURCE_ROOT/ios/InterceptorRunner\"" \
+      "OTHER_SWIFT_FLAGS=-file-prefix-map \"$REPO_ROOT=$PUBLIC_SOURCE_ROOT\" -debug-prefix-map \"$REPO_ROOT=$PUBLIC_SOURCE_ROOT\" -file-compilation-dir \"$PUBLIC_SOURCE_ROOT/ios/InterceptorRunner\"" \
       -derivedDataPath "$RUNNER_DD" >/dev/null
     RUNNER_PRODUCTS="$RUNNER_DD/Build/Products"
   fi
   if [[ -n "$RUNNER_PRODUCTS" && -d "$RUNNER_PRODUCTS" ]]; then
-    # exclude dSYMs to keep the bundle lean
-    run tar --exclude='*.dSYM' -cf "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios-runner.tar" -C "$RUNNER_PRODUCTS" .
+    RUNNER_XCTESTRUN="$(find "$RUNNER_PRODUCTS" -maxdepth 1 -type f -name '*.xctestrun' -print -quit)"
+    RUNNER_APP="$(find "$RUNNER_PRODUCTS" -mindepth 2 -maxdepth 2 -type d -name 'InterceptorRunner-Runner.app' -print -quit)"
+    if [[ -z "$RUNNER_XCTESTRUN" || -z "$RUNNER_APP" ]]; then
+      echo "ERROR: iOS agent build is incomplete (missing runner app or .xctestrun)" >&2
+      exit 1
+    fi
+    RUNNER_XCTESTRUN_REL="${RUNNER_XCTESTRUN#"$RUNNER_PRODUCTS"/}"
+    RUNNER_APP_REL="${RUNNER_APP#"$RUNNER_PRODUCTS"/}"
+    # Ship only the runtime app and launch descriptor. Swift modules, dSYMs,
+    # index data, and other compiler products are not needed on user machines.
+    run tar --uid 0 --gid 0 --uname root --gname wheel --exclude='*.dSYM' \
+      -cf "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios-runner.tar" \
+      -C "$RUNNER_PRODUCTS" "$RUNNER_XCTESTRUN_REL" "$RUNNER_APP_REL"
     echo "==> iOS agent bundled UNSIGNED (ios-runner.tar)"
   else
     echo "==> NOTE: iOS agent not bundled (no Products dir) — 'interceptor ios install'/'setup' will report it missing"
@@ -470,12 +501,16 @@ if [[ "$BUILD_FULL" == "1" ]]; then
   fi
 fi
 
-# Per-mode --scripts dirs: exactly one postinstall per mode.
+# Per-mode --scripts dirs: a shared first-install marker plus one postinstall per mode.
 if [[ "$BUILD_BROWSER" == "1" ]]; then
+  run cp "$PREINSTALL_EXTENSION_STORE" "$SCRIPTS_BROWSER_DIR/preinstall"
+  run chmod 755 "$SCRIPTS_BROWSER_DIR/preinstall"
   run cp "$POSTINSTALL_BROWSER" "$SCRIPTS_BROWSER_DIR/postinstall"
   run chmod 755 "$SCRIPTS_BROWSER_DIR/postinstall"
 fi
 if [[ "$BUILD_FULL" == "1" ]]; then
+  run cp "$PREINSTALL_EXTENSION_STORE" "$SCRIPTS_FULL_DIR/preinstall"
+  run chmod 755 "$SCRIPTS_FULL_DIR/preinstall"
   run cp "$POSTINSTALL_FULL" "$SCRIPTS_FULL_DIR/postinstall"
   run chmod 755 "$SCRIPTS_FULL_DIR/postinstall"
 fi
@@ -728,13 +763,28 @@ if [[ "$DRY_RUN" != "1" ]]; then
   rm -f "$UNSIGNED_BROWSER_PKG" "$UNSIGNED_FULL_PKG"
 fi
 
+# ── Step 12b: Chrome Web Store package ────────────────────────────────────────
+# The store copy of the extension must move in lockstep with the pkg, or store
+# users answer new CLI verbs with "unknown action type". Build the upload zip
+# here; uploading is the manual dashboard step named below.
+echo "==> Step 12b: Chrome Web Store package"
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "    DRY: bash scripts/build-store-zip.sh"
+else
+  bash "$REPO_ROOT/scripts/build-store-zip.sh"
+fi
+echo "    Upload dist/Interceptor-Extension-$VERSION.zip: dashboard → Interceptor → Package → Upload new package,"
+echo "    then Submit for review (docs/chrome-web-store.md §7)."
+echo ""
+
 # ── Step 13: Publish Sparkle appcast — REMOVED ────────────────────────────────
 # Sparkle publish is intentionally NOT part of release.sh anymore. Auto-pushing
 # the appcast inside the same script that produced the .pkg meant a fresh build
 # went straight into the auto-update pipeline with no human-in-the-loop test
-# gate. Run `bash scripts/publish-sparkle.sh` AFTER testing the .pkg locally,
-# only when you're sure the build is good.
+# gate. Update docs/release-notes.html, run `bash scripts/publish-sparkle.sh`
+# after testing the .pkg locally, and publish only when the build is approved.
 echo "==> Step 13: Sparkle publish — SKIPPED (run separately after testing)"
+echo "    Confirm docs/release-notes.html has a newest-first section for $VERSION."
 echo "    Test the .pkg locally, then publish with:"
 echo "        bash scripts/publish-sparkle.sh"
 echo "    See scripts/publish-sparkle.sh --help for flags."

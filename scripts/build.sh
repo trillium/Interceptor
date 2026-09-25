@@ -7,6 +7,7 @@ TARGET="host"
 BUILD_ALL=0
 ORIG_MANIFEST_VERSION=""
 ORIG_NATIVE_BUILD_CONFIG=""
+ORIG_VERSION_SOURCE=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -19,8 +20,14 @@ done
 stamp_version() {
   local sha date pkg_version platform_targets agent_dylibs_bundled
   sha=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
-  date=$(date -u +%Y-%m-%d)
+  if [[ "$sha" != "dev" ]] && [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+    sha="${sha}-dirty"
+  fi
+  date=$(git show -s --format=%cs HEAD 2>/dev/null || date -u +%Y-%m-%d)
   pkg_version=$(grep '"version"' package.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+  if [[ -f cli/version.ts && -z "$ORIG_VERSION_SOURCE" ]]; then
+    ORIG_VERSION_SOURCE="$(cat cli/version.ts)"
+  fi
   if [[ -f shared/native-build-config.ts && -z "$ORIG_NATIVE_BUILD_CONFIG" ]]; then
     ORIG_NATIVE_BUILD_CONFIG="$(cat shared/native-build-config.ts)"
   fi
@@ -67,7 +74,9 @@ EOF
 }
 
 restore_version() {
-  git checkout cli/version.ts 2>/dev/null || true
+  if [[ -n "$ORIG_VERSION_SOURCE" ]]; then
+    printf '%s\n' "$ORIG_VERSION_SOURCE" > cli/version.ts
+  fi
   if [[ -n "$ORIG_NATIVE_BUILD_CONFIG" ]]; then
     printf '%s\n' "$ORIG_NATIVE_BUILD_CONFIG" > shared/native-build-config.ts
   else
@@ -100,8 +109,10 @@ build_extension() {
   bun build extension/src/inject-net.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser
   bun build extension/src/offscreen.ts --outfile=extension/dist/offscreen.js --target=browser
-  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser
+  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser --format=iife
   cp extension/manifest.json extension/dist/
+  # The manifest names this file; a missing or invalid schema stops Chrome from loading the extension.
+  cp extension/managed-schema.json extension/dist/
   cp extension/offscreen.html extension/dist/
   cp extension/popup.html extension/dist/
   rm -rf extension/dist/icons
@@ -132,6 +143,7 @@ build_extension_mv2() {
   cp extension/dist/inject-canvas.js extension/dist-mv2/inject-canvas.js
   cp extension/dist/offscreen.html extension/dist-mv2/offscreen.html
   cp extension/dist/popup.html extension/dist-mv2/popup.html
+  cp extension/dist/popup.js extension/dist-mv2/popup.js
   printf '%s\n' 'globalThis.INTERCEPTOR_APP_CONTEXT_ID = "app:electron";' > extension/dist-mv2/electron-config.js
   rm -rf extension/dist-mv2/icons
   cp -R extension/icons extension/dist-mv2/icons
@@ -163,6 +175,72 @@ fs.writeFileSync("extension/dist-mv2/manifest.json", JSON.stringify(manifest, nu
   chmod -R u+rwX,go+rX extension/dist-mv2/icons 2>/dev/null || true
 }
 
+build_extension_safari() {
+  # Safari Web Extension (MV3). Retarget of the same src tree:
+  # native-relay background (background-safari), portable content/inject scripts
+  # reused verbatim from dist, and a permission-stripped manifest (Safari has no
+  # debugger/tabGroups/offscreen/tabCapture/power/idle/sessions/pageCapture, so
+  # OCR/pixel-capture route to the native `interceptor macos` lane, not tesseract).
+  echo "Building Safari Web Extension (MV3)..."
+  rm -rf extension/dist-safari
+  mkdir -p extension/dist-safari
+  bun build extension/src/background-safari.ts --outfile=extension/dist-safari/background-safari.js --target=browser
+  cp extension/dist/content.js extension/dist-safari/content.js
+  cp extension/dist/net-buffer-content.js extension/dist-safari/net-buffer-content.js
+  cp extension/dist/inject-net.js extension/dist-safari/inject-net.js
+  cp extension/dist/inject-canvas.js extension/dist-safari/inject-canvas.js
+  cp extension/dist/popup.js extension/dist-safari/popup.js
+  cp extension/popup.html extension/dist-safari/popup.html
+  rm -rf extension/dist-safari/icons
+  cp -R extension/icons extension/dist-safari/icons
+  bun -e '
+const fs = require("fs");
+const base = JSON.parse(fs.readFileSync("extension/manifest.json", "utf8"));
+const manifest = {
+  manifest_version: 3,
+  name: "Interceptor",
+  version: base.version,
+  description: base.description,
+  icons: base.icons,
+  // Safari-supported permission subset (verified against WKWebExtension.Permission).
+  // notifications has no permission constant and the packager rejects it, so it is
+  // omitted; notifications route to the native macos lane.
+  // declarativeNetRequestWithHostAccess is required by Safari for modifyHeaders and
+  // redirect actions; declarativeNetRequest alone only authorizes block and allow.
+  permissions: [
+    "activeTab", "scripting", "tabs", "storage", "nativeMessaging", "cookies",
+    "webNavigation", "declarativeNetRequest", "declarativeNetRequestWithHostAccess",
+    "contextMenus", "alarms", "clipboardWrite"
+  ],
+  host_permissions: ["<all_urls>"],
+  commands: base.commands,
+  // The bundle is self-contained (bun inlines every import), so no type:module —
+  // Safari does not honor a module service worker and warns on the key.
+  background: { service_worker: "background-safari.js" },
+  // Safari applies the extension-page CSP to its background worker. Keep the
+  // loopback endpoints explicit for diagnostic/fallback probes. The selected
+  // production path is the containing appex native relay.
+  content_security_policy: {
+    extension_pages: "script-src '"'"'self'"'"'; object-src '"'"'self'"'"'; connect-src ws://127.0.0.1:* ws://localhost:*"
+  },
+  action: {
+    default_title: "Interceptor",
+    default_popup: "popup.html",
+    default_icon: base.action && base.action.default_icon ? base.action.default_icon : base.icons
+  },
+  content_scripts: [
+    { matches: ["<all_urls>"], js: ["net-buffer-content.js"], run_at: "document_start", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["inject-net.js"], run_at: "document_start", world: "MAIN", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["inject-canvas.js"], run_at: "document_start", world: "MAIN", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["content.js"], run_at: "document_idle", all_frames: true, match_origin_as_fallback: true }
+  ]
+};
+fs.writeFileSync("extension/dist-safari/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+'
+  chmod 644 extension/dist-safari/* 2>/dev/null || true
+  chmod -R u+rwX,go+rX extension/dist-safari/icons 2>/dev/null || true
+}
+
 build_host() {
   echo "Building CLI (host)..."
   bun build cli/index.ts --compile --outfile=dist/interceptor
@@ -177,19 +255,113 @@ build_macos() {
   bun build daemon/index.ts --compile --target=bun-darwin-arm64 --outfile=daemon/interceptor-daemon
 }
 
-build_windows() {
-  # Modern (default) target. We tried -baseline (which drops the AVX2
-  # requirement so the .exe runs on older/virtualized CPUs), but bun's baseline
-  # Windows runtime currently fails to extract ("Failed to extract executable
-  # for 'bun-windows-x64-baseline-...'") on bun 1.3.x — so the modern target is
-  # the only working build today. CAVEAT: the resulting .exe needs an
-  # AVX2-capable CPU (≈ any machine from 2013+); on hardware without AVX2 it
-  # crashes at launch with "Illegal instruction". Revisit -baseline once bun
-  # ships a working baseline Windows artifact.
-  echo "Building CLI (Windows x64)..."
-  bun build cli/index.ts --compile --target=bun-windows-x64 --outfile=dist/interceptor.exe
-  echo "Building daemon (Windows x64)..."
-  bun build daemon/index.ts --compile --target=bun-windows-x64 --outfile=daemon/interceptor-daemon.exe
+# Windows keeps a mandatory write lock on a running .exe, so `bun build
+# --compile` over a live binary fails with a bare EPERM. This MUST run before the
+# first compile: build_host writes the CLI first (bun appends .exe on a Windows
+# host), so a locked daemon would otherwise leave a freshly-built CLI beside a
+# stale daemon — a half-updated pair that reads as a clean build (`set -e` does
+# exit 1, but the CLI on disk is already new, and the two then disagree on
+# protocol).
+#
+# taskkill is NOT the remedy: the daemon is a browser-launched native-messaging
+# host, so the browser respawns it within a second (measured — five kills in a
+# row never yielded an unlocked window). What DOES work is what Inno's Restart
+# Manager path does: the lock forbids write and delete but permits RENAME, so the
+# live image is moved aside and the compile writes a fresh file at the original
+# path. The sidelined copy keeps running until its browser drops it, and is
+# ignored by git (dist/ is wholly ignored; daemon/*.exe.old-* is an explicit rule
+# because daemon/*.exe does NOT match a .exe.old-NNN suffix).
+prepare_windows_outputs() {
+  local out bak stuck=()
+  for out in dist/interceptor.exe daemon/interceptor-daemon.exe; do
+    [[ -f "$out" ]] || continue
+    # Append zero bytes: opens for write without changing content. A running
+    # image refuses it; nothing else here does.
+    if (printf '' >> "$out") 2>/dev/null; then
+      continue
+    fi
+    # Reap earlier sidelined copies whose holder has since exited. Done BEFORE
+    # the rename below so the glob cannot match the copy we are about to create;
+    # still-locked ones simply refuse deletion and are left for the next run.
+    rm -f "${out}.old-"* 2>/dev/null || true
+    bak="${out}.old-$$"
+    if mv "$out" "$bak" 2>/dev/null; then
+      echo "  note: $out was locked by a running process — moved aside to $bak"
+    else
+      stuck+=("$out")
+    fi
+  done
+  if [[ ${#stuck[@]} -eq 0 ]]; then
+    return 0
+  fi
+  echo "" >&2
+  echo "ERROR: Windows build target(s) are locked and could not be moved aside:" >&2
+  for out in "${stuck[@]}"; do echo "  $out" >&2; done
+  echo "" >&2
+  echo "       Close the browser that owns the native-messaging host (the daemon is" >&2
+  echo "       respawned on demand, so taskkill alone will not free it), then re-run." >&2
+  echo "       Stopped before compiling so you don't get a new CLI beside a stale daemon." >&2
+  exit 1
+}
+
+build_windows_arch() {
+  local arch="$1"
+  local bun_target stage identity_flag
+  case "$arch" in
+    x64) bun_target="bun-windows-x64-baseline" ;;
+    arm64) bun_target="bun-windows-arm64" ;;
+    *) echo "Unsupported Windows architecture: $arch" >&2; exit 1 ;;
+  esac
+
+  stage="dist/windows/$arch"
+  rm -rf "$stage"
+  mkdir -p "$stage/daemon"
+
+  echo "Building CLI (Windows $arch, $bun_target)..."
+  bun build cli/index.ts --compile --target="$bun_target" --outfile="$stage/interceptor.exe"
+  echo "Building daemon (Windows $arch, $bun_target)..."
+  bun build daemon/index.ts --compile --target="$bun_target" --outfile="$stage/daemon/interceptor-daemon.exe"
+
+  cp assets/windows/interceptor.ico "$stage/interceptor.ico"
+  identity_flag=()
+  if [[ "${INTERCEPTOR_WINDOWS_IDENTITY_MODE:-production}" == "development" ]]; then
+    identity_flag=(--development)
+  fi
+  bun scripts/installer/generate-native-host.ts ${identity_flag[@]+"${identity_flag[@]}"} \
+    --output "$stage/daemon/com.interceptor.host.json"
+
+  # Bundle the unpacked browser extension so the installer drops it on disk at
+  # {app}\extension — a single, stable place for the user to point "Load
+  # unpacked" (Developer mode). Mirrors the macOS package, which ships it under
+  # ~/Library/Application Support/Interceptor/extension. Every target that calls
+  # build_windows_arch builds the extension first (see the dispatch below), so
+  # dist is always current here; fail loud rather than stage a stale copy.
+  if [[ ! -f extension/dist/manifest.json ]]; then
+    echo "extension/dist is missing — build_extension must run before build_windows_arch" >&2
+    exit 1
+  fi
+  rm -rf "$stage/extension"
+  cp -R extension/dist "$stage/extension"
+}
+
+build_linux_arch() {
+  local arch="$1"
+  local bun_target stage
+  case "$arch" in
+    x64) bun_target="bun-linux-x64-baseline" ;;
+    arm64) bun_target="bun-linux-arm64" ;;
+    *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+  esac
+
+  stage="dist/linux/$arch"
+  rm -rf "$stage"
+  mkdir -p "$stage/daemon"
+  echo "Building CLI (Linux $arch, $bun_target)..."
+  bun build cli/index.ts --compile --target="$bun_target" --outfile="$stage/interceptor"
+  echo "Building daemon (Linux $arch, $bun_target)..."
+  bun build daemon/index.ts --compile --target="$bun_target" --outfile="$stage/daemon/interceptor-daemon"
+  cp daemon/com.interceptor.host.json "$stage/daemon/com.interceptor.host.json"
+  chmod 755 "$stage/interceptor" "$stage/daemon/interceptor-daemon"
 }
 
 build_bridge() {
@@ -206,42 +378,115 @@ build_bridge() {
   bash scripts/build-bridge.sh
 }
 
-build_extension
-build_extension_mv2
+# Preflight before any bundling: a locked .exe is a user-fixable condition, and
+# there is no point spending an extension build to discover it. The trigger is the
+# host target (the default) plus --all, because build_host is what writes
+# dist/interceptor.exe and daemon/interceptor-daemon.exe on a Windows host. The
+# windows-x64 / windows-arm64 targets stage into dist/windows/<arch>/ instead and
+# are not covered here.
+if [[ "$BUILD_ALL" == "1" || "$TARGET" == "host" ]]; then
+  prepare_windows_outputs
+fi
 
 if [[ "$BUILD_ALL" == "1" ]]; then
+  build_extension
+  build_extension_mv2
+  build_extension_safari
   build_host
   build_macos
-  build_windows
+  build_windows_arch x64
+  build_windows_arch arm64
+  build_linux_arch x64
+  build_linux_arch arm64
   build_bridge
 elif [[ "$TARGET" == "host" ]]; then
+  build_extension
+  build_extension_mv2
+  build_extension_safari
   build_host
   build_bridge
 elif [[ "$TARGET" == "macos" ]]; then
+  build_extension
+  build_extension_mv2
+  build_extension_safari
   build_macos
   build_bridge
+elif [[ "$TARGET" == "windows-x64" ]]; then
+  build_extension
+  build_windows_arch x64
+elif [[ "$TARGET" == "windows-arm64" ]]; then
+  build_extension
+  build_windows_arch arm64
+elif [[ "$TARGET" == "linux" ]]; then
+  build_extension
+  build_linux_arch x64
+  build_linux_arch arm64
+elif [[ "$TARGET" == "linux-x64" ]]; then
+  build_extension
+  build_linux_arch x64
+elif [[ "$TARGET" == "linux-arm64" ]]; then
+  build_extension
+  build_linux_arch arm64
 elif [[ "$TARGET" == "windows" ]]; then
-  build_windows
+  echo "Unsupported target: windows. Use --target=windows-x64 or --target=windows-arm64." >&2
+  exit 1
 else
   echo "Unsupported target: $TARGET" >&2
   exit 1
 fi
 
+# Ad-hoc sign macOS binaries. Apple Silicon SIGKILLs unsigned Mach-O executables
+# (symptom: `interceptor` exits 137 / "Killed: 9" with empty output, daemon never
+# stays up). `bun build --compile` output can land unsigned or with a malformed
+# signature slot, so remove any existing signature then re-sign ad-hoc.
+# No --entitlements here: entitlement enforcement only applies under the
+# hardened runtime, which ad-hoc signing doesn't enable. Release builds are
+# re-signed (--force) with the real identity + entitlements by release.sh.
+if [[ "$(uname -s)" == "Darwin" && ( "$BUILD_ALL" == "1" || "$TARGET" == "host" || "$TARGET" == "macos" ) ]] && command -v codesign >/dev/null 2>&1; then
+  for b in dist/interceptor daemon/interceptor-daemon dist/interceptor-bridge; do
+    if [[ -f "$b" ]]; then
+      codesign --remove-signature "$b" 2>/dev/null || true
+      codesign --force --sign - "$b" && echo "  signed (adhoc): $b"
+      codesign --verify --strict "$b"
+    fi
+  done
+  # Smoke check: the exact failure this signing step fixes is a silent
+  # Killed:9 at first run, so prove the CLI actually executes.
+  if [[ "$TARGET" != windows-* && -x dist/interceptor ]]; then
+    ./dist/interceptor --version >/dev/null
+    echo "  smoke check: dist/interceptor --version OK"
+  fi
+fi
+
 echo "Build complete."
-echo "  Extension: extension/dist/"
-echo "  Electron extension: extension/dist-mv2/"
 if [[ "$BUILD_ALL" == "1" ]]; then
+  echo "  Extension: extension/dist/"
+  echo "  Electron extension: extension/dist-mv2/"
+  echo "  Safari extension: extension/dist-safari/"
   echo "  Host CLI:   dist/interceptor"
   echo "  Host Daemon: daemon/interceptor-daemon"
   echo "  macOS CLI:  dist/interceptor"
   echo "  macOS Daemon: daemon/interceptor-daemon"
   echo "  macOS Bridge: dist/interceptor-bridge"
-  echo "  Windows CLI: dist/interceptor.exe"
-  echo "  Windows Daemon: daemon/interceptor-daemon.exe"
-elif [[ "$TARGET" == "windows" ]]; then
-  echo "  CLI:       dist/interceptor.exe"
-  echo "  Daemon:    daemon/interceptor-daemon.exe"
+  echo "  Windows x64: dist/windows/x64/"
+  echo "  Windows ARM64: dist/windows/arm64/"
+  echo "  Linux x64: dist/linux/x64/"
+  echo "  Linux ARM64: dist/linux/arm64/"
+elif [[ "$TARGET" == "windows-x64" ]]; then
+  echo "  Windows x64: dist/windows/x64/"
+elif [[ "$TARGET" == "windows-arm64" ]]; then
+  echo "  Windows ARM64: dist/windows/arm64/"
+elif [[ "$TARGET" == "linux" ]]; then
+  echo "  Linux x64: dist/linux/x64/"
+  echo "  Linux ARM64: dist/linux/arm64/"
+elif [[ "$TARGET" == "linux-x64" ]]; then
+  echo "  Linux x64: dist/linux/x64/"
+elif [[ "$TARGET" == "linux-arm64" ]]; then
+  echo "  Linux ARM64: dist/linux/arm64/"
 else
+  echo "  Extension: extension/dist/"
+  echo "  Electron extension: extension/dist-mv2/"
+  echo "  Safari extension: extension/dist-safari/"
   echo "  CLI:       dist/interceptor"
   echo "  Daemon:    daemon/interceptor-daemon"
   if [[ "$(uname -s)" == "Darwin" ]]; then

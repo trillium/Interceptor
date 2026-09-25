@@ -256,4 +256,83 @@ describe("macos parser", () => {
     expect(action.jsc).toBe("run = argv => argv.join('|')")
     expect(action.args).toEqual(["alpha", "beta"])
   })
+
+  // help advertises `tree --max-chars` but the parser
+  // used to drop it. These lock the fix so the drift cannot regress.
+  test("tree --max-chars is forwarded to the bridge", () => {
+    const action = parseMacosCommand(["macos", "tree", "--app", "Finder", "--max-chars", "1000"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_tree")
+    expect(action.maxChars).toBe(1000)
+  })
+
+  test("tree without --max-chars defaults to 50000", () => {
+    const action = parseMacosCommand(["macos", "tree", "--app", "Finder"]) as Record<string, unknown>
+    expect(action.type).toBe("macos_tree")
+    expect(action.maxChars).toBe(50000)
+  })
+
+  test("tree still forwards app/pid/filter/depth alongside max-chars", () => {
+    const action = parseMacosCommand([
+      "macos", "tree", "--pid", "4242", "--filter", "all", "--depth", "5", "--max-chars", "20000",
+    ]) as Record<string, unknown>
+    expect(action.pid).toBe(4242)
+    expect(action.filter).toBe("all")
+    expect(action.depth).toBe(5)
+    expect(action.maxChars).toBe(20000)
+  })
+
+  // traversal-bound flags reach the bridge (which clamps them).
+  test("tree forwards --max-nodes and --max-ms when present", () => {
+    const action = parseMacosCommand([
+      "macos", "tree", "--app", "Finder", "--max-nodes", "500", "--max-ms", "3000",
+    ]) as Record<string, unknown>
+    expect(action.maxNodes).toBe(500)
+    expect(action.maxMs).toBe(3000)
+  })
+
+  test("tree omits max-nodes/max-ms when absent (bridge applies defaults)", () => {
+    const action = parseMacosCommand(["macos", "tree", "--app", "Finder"]) as Record<string, unknown>
+    expect(action.maxNodes).toBeUndefined()
+    expect(action.maxMs).toBeUndefined()
+  })
+
+  // find/focused/windows now forward --pid (previously dropped).
+  test("find forwards --pid and traversal bounds", () => {
+    const action = parseMacosCommand([
+      "macos", "find", "Save", "--pid", "77", "--max-nodes", "800",
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_find")
+    expect(action.query).toBe("Save")
+    expect(action.pid).toBe(77)
+    expect(action.maxNodes).toBe(800)
+  })
+
+  test("focused and windows forward --pid", () => {
+    const f = parseMacosCommand(["macos", "focused", "--pid", "88"]) as Record<string, unknown>
+    expect(f.type).toBe("macos_focused")
+    expect(f.pid).toBe(88)
+    const w = parseMacosCommand(["macos", "windows", "--pid", "99"]) as Record<string, unknown>
+    expect(w.type).toBe("macos_windows")
+    expect(w.pid).toBe(99)
+  })
+
+  // PhotosDomain casts size with `as? Int` — a string forward is silently
+  // dropped and the resize/encode branch becomes unreachable (#187).
+  test("photos export forwards --size as an int and --format as a string", () => {
+    const action = parseMacosCommand([
+      "macos", "photos", "export", "ABC/L0/001", "--out", "/tmp/x.png", "--size", "400", "--format", "png",
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_photos")
+    expect(action.size).toBe(400)
+    expect(action.format).toBe("png")
+    expect(action.out).toBe("/tmp/x.png")
+  })
+
+  test("photos thumbnail forwards --size as an int", () => {
+    const action = parseMacosCommand([
+      "macos", "photos", "thumbnail", "ABC/L0/001", "--size", "512",
+    ]) as Record<string, unknown>
+    expect(action.type).toBe("macos_photos")
+    expect(action.size).toBe(512)
+  })
 })

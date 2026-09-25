@@ -8,6 +8,22 @@ export function isControlMessage(msg: unknown): boolean {
   return candidate?.type === "ping" || candidate?.type === "pong"
 }
 
+/** Keepalive ping arriving over a registered native relay socket. Answered
+ *  directly on the originating socket so liveness never depends on the
+ *  relay-slot routing state. */
+export function isRelayPing(msg: unknown): boolean {
+  return (msg as { type?: unknown } | null)?.type === "ping"
+}
+
+/** Identity-checked relay-slot release: only the CURRENT relay's close frees
+ *  the slot. A superseded relay's lingering process closing later must not
+ *  unregister the live relay — that clobber turned any transient reconnect
+ *  into a permanent pong-timeout loop. */
+export function relaySlotAfterClose<S>(current: S | null, closing: S): { slot: S | null; released: boolean } {
+  if (current === closing) return { slot: null, released: true }
+  return { slot: current, released: false }
+}
+
 export function chooseOutboundTransport(
   msg: unknown,
   state: {

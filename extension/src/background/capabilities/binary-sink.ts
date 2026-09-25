@@ -1,6 +1,8 @@
+import { IK_SINK_TT_POLICY, SINK_TT_POLICY_NAME } from "../../inject-keys"
 import { runWithCspStripBypass } from "./evaluate"
+import { wsEndpoint } from "../ws-endpoint"
 
-type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
+type ActionResult = { success: boolean; error?: string; warning?: string; data?: unknown; tabId?: number }
 
 type ByteSource = {
   url: string
@@ -20,8 +22,9 @@ async function executeNormalize(
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world,
-    args: [code],
-    func: async (sourceCode: string) => {
+    args: [code, IK_SINK_TT_POLICY, SINK_TT_POLICY_NAME],
+    func: async (sourceCode: string, ttKey: string, ttName: string) => {
+      const TT = Symbol.for(ttKey)
       async function normalize(value: unknown): Promise<{
         url: string
         size: number
@@ -109,12 +112,12 @@ async function executeNormalize(
         const w = window as any
         let evalSource: any = sourceCode
         if (w.trustedTypes) {
-          if (!w.__interceptor_sink_tt_policy) {
-            w.__interceptor_sink_tt_policy = w.trustedTypes.createPolicy("interceptor-binary-sink", {
+          if (!w[TT]) {
+            w[TT] = w.trustedTypes.createPolicy(ttName, {
               createScript: (s: string) => s
             })
           }
-          evalSource = w.__interceptor_sink_tt_policy.createScript(sourceCode)
+          evalSource = w[TT].createScript(sourceCode)
         }
         const value = (0, eval)(evalSource as string)
         return { success: true, data: await normalize(value) }
@@ -127,7 +130,7 @@ async function executeNormalize(
   return (results[0]?.result as ActionResult) ?? { success: false, error: "no result" }
 }
 
-async function prepareByteSource(
+export async function prepareByteSource(
   tabId: number,
   code: string,
   world: "MAIN" | "ISOLATED"
@@ -146,7 +149,7 @@ async function prepareByteSource(
   if (!evalResult.success) return evalResult
 
   // The TT / CSP fallback paths wrap the value as
-  // { value, trustedTypesFallback | cspBypassApplied, originalError }; unwrap it
+  // { value, cspBypassApplied, originalError }; unwrap it
   // back to the bare ByteSource descriptor.
   let descriptor: any = evalResult.data
   if (
@@ -158,7 +161,9 @@ async function prepareByteSource(
   if (!descriptor || typeof descriptor !== "object" || typeof descriptor.url !== "string") {
     return { success: false, error: "byte source normalization returned no blob URL" }
   }
-  return { success: true, data: descriptor as ByteSource }
+  // Keep the CSP-recovery disclosure: the reload that made the bytes reachable
+  // also discarded the page's state, and the caller hears that from `warning`.
+  return { success: true, data: descriptor as ByteSource, ...(evalResult.warning ? { warning: evalResult.warning } : {}) }
 }
 
 async function cleanupByteSource(tabId: number, source: ByteSource, world: "MAIN" | "ISOLATED"): Promise<void> {
@@ -199,6 +204,9 @@ async function stageByteSource(tabId: number, source: ByteSource): Promise<Stage
         throw new Error(`source fetch failed: ${response.status} ${response.statusText}`)
       }
       const bytes = new Uint8Array(await response.arrayBuffer())
+      // Staged in the ISOLATED content-script world (see world: "ISOLATED" above),
+      // not the page's MAIN world — so this key is not enumerable by the page and
+      // is intentionally left as a plain string rather than de-branded (#178).
       const key = "__interceptor_binary_sink_" + crypto.randomUUID().replace(/-/g, "")
       ;(globalThis as any)[key] = bytes
       return { key, bytes: bytes.byteLength }
@@ -258,7 +266,7 @@ function wait(ms: number): Promise<void> {
 }
 
 function connectSinkSocket(): Promise<SinkSocket> {
-  const WS_URL = "ws://localhost:19222"
+  const WS_URL = wsEndpoint()
   const MAGIC = new Uint8Array([0x49, 0x42, 0x53, 0x31]) // IBS1
   const encoder = new TextEncoder()
   const sinkId = crypto.randomUUID()
@@ -406,7 +414,8 @@ export async function handleBinarySinkActions(
 
   const source = prepared.data as ByteSource
   try {
-    return await streamByteSource(tabId, source, out, chunkSize)
+    const result = await streamByteSource(tabId, source, out, chunkSize)
+    return prepared.warning ? { ...result, warning: prepared.warning } : result
   } finally {
     await cleanupByteSource(tabId, source, world)
   }

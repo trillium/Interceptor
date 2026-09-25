@@ -37,6 +37,13 @@ export const IOS_RUNNER_OPS = {
   keys: "keys",
   press: "press",
   app: "app",
+  eval: "eval",
+  // issue #244: lock-screen passcode entry (wake, swipe up, type into SpringBoard).
+  unlock: "unlock",
+  /** Multi-touch: one XCSynthesizedEventRecord with one pointer path per finger. */
+  gesture: "gesture",
+  /** JPEG frame push loop (start|stop|status); frames arrive as binary WS messages. */
+  stream: "stream",
 } as const
 export type IosRunnerOp = (typeof IOS_RUNNER_OPS)[keyof typeof IOS_RUNNER_OPS]
 
@@ -72,7 +79,8 @@ export const IOS_ACTION_TYPES = new Set<string>([
 export const IOS_VERB_TYPES = new Set<string>([
   "ios_tree", "ios_find", "ios_inspect", "ios_click", "ios_type", "ios_keys",
   "ios_scroll", "ios_drag", "ios_press", "ios_screenshot", "ios_apps", "ios_app",
-  "ios_fgdebug",
+  "ios_fgdebug", "ios_eval", "ios_unlock",
+  "ios_gesture", "ios_stream", "ios_frame",
 ])
 
 /**
@@ -115,7 +123,20 @@ export type IosDeviceState = {
   /** Runner signing expiry epoch ms, when known (1-yr paid / 7-day free). */
   signingExpiresAt?: number
   registeredAt: number
+  /** ws://host:port the runner is handed to dial back, and which ladder rung chose it. */
+  dialBack?: string
+  dialBackVia?: IosDialBackVia
 }
+
+/**
+ * Which rung of the dial-back ladder picked the runner's WebSocket host:
+ * `override` (INTERCEPTOR_WS_URL), `loopback` (simulator), `vpn` (CGNAT utun —
+ * exempt from iOS Local Network privacy), `interface` (the Mac interface usbmuxd
+ * discovered the phone on, matched by InterfaceIndex; works whatever address
+ * family usbmuxd reports), `subnet` (Mac interface on the phone's own IPv4
+ * subnet), `default-route`, `first` (first non-internal IPv4).
+ */
+export type IosDialBackVia = "override" | "loopback" | "vpn" | "interface" | "subnet" | "default-route" | "first"
 
 // ── Pure helpers (unit tested) ────────────────────────────────────────────────
 

@@ -5,6 +5,9 @@ import {
 } from "./tab-group"
 import { routeAction } from "./router"
 import { needsTab } from "./no-tab-actions"
+import { resolveWorkingTabId } from "./resolve-tab"
+import { recordGroupActivity } from "./tab-lifecycle"
+import { consumeSwitchBack } from "./switch-back"
 
 export const MESSAGE_QUEUE_CAP = 50
 export const messageQueue: Array<{
@@ -22,6 +25,44 @@ export const pendingRequests = new Map<string, {
   timer: ReturnType<typeof setTimeout>
   viaWs?: boolean
 }>()
+
+export type GroupDispatchScope = { label: string | undefined; soft: boolean; hard: boolean }
+
+/** Pure group-gate decision shared by dispatch and its behavior tests. */
+export function resolveGroupDispatchScope(action: { [key: string]: unknown }): GroupDispatchScope {
+  const label = typeof action.group === "string" && action.group.length > 0
+    ? action.group
+    : undefined
+  const soft = label !== undefined && action.groupSoft === true
+  return { label, soft, hard: label !== undefined && !soft && action.anyTab !== true }
+}
+
+/**
+ * Resolve the explicit-target membership gate to an error string instead of
+ * allowing a stale chrome tab lookup to escape before the daemon response is
+ * sent. Returning null means the target passed the gate.
+ */
+export async function managedTabGateError(
+  tabId: number,
+  groupLabel: string | undefined,
+  groupHard: boolean
+): Promise<string | null> {
+  try {
+    if (groupHard) {
+      const inNamed = await isTabInNamedGroup(tabId, groupLabel!)
+      return inNamed
+        ? null
+        : `tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`
+    }
+    const inAny = await isTabInAnyManagedGroup(tabId)
+    return !inAny && anyManagedGroupKnown()
+      ? `tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`
+      : null
+  } catch {
+    const groupArg = groupHard && groupLabel ? ` --group ${groupLabel}` : ""
+    return `tab ${tabId} is unavailable; run 'interceptor tabs${groupArg}' to refresh tab IDs and retry`
+  }
+}
 
 // the auto-target is per-group. Grouped requests use "activeTabId:<label>"
 // so concurrent agents on one context never clobber each other's target; the bare
@@ -49,6 +90,13 @@ export function drainMessageQueue(): void {
     const queued = messageQueue.shift()!
     handleDaemonMessage(queued)
   }
+}
+
+/** Issue #162: "no active tab" on a windowless profile should say so and name the fix. */
+export function noActiveTabError(windowCount: number | null): string {
+  return windowCount === 0
+    ? "no browser window is open in this profile — 'interceptor open <url>' creates one in the background"
+    : "no active tab"
 }
 
 export async function handleDaemonMessage(msg: {
@@ -103,7 +151,17 @@ export async function handleDaemonMessage(msg: {
   })
 
   const action = msg.action
-  let tabId = msg.tabId
+  // Tab-targeted actions name their target tab in `action.tabId` — the CLI puts
+  // the `tab close <id>` / `tab switch <id>` argument there, while the top-level
+  // `msg.tabId` only carries the global `--tab` override. Without honoring the
+  // explicit target here, resolution below falls through to the active tab, so a
+  // tab-targeted request group-validates and operates on whatever tab is
+  // foregrounded: `tab close <id>` fails with "tab <active-id> is not in the
+  // interceptor group" and leaves <id> open, and switch-then-close acknowledges
+  // while the tab survives. The explicit target wins over `--tab`: the tab
+  // handlers act on `action.tabId` whenever it is present, so the gate below
+  // must validate that same tab, never a different one.
+  let tabId = resolveWorkingTabId(msg.tabId, action.tabId)
 
   const fail = (error: string): void => {
     clearTimeout(requestTimer)
@@ -112,24 +170,31 @@ export async function handleDaemonMessage(msg: {
   }
 
   // per-request group scope rides inside the action payload.
-  const groupLabel = typeof action.group === "string" && action.group.length > 0
-    ? action.group
-    : undefined
+  const { label: groupLabel, soft: groupSoft, hard: groupHard } = resolveGroupDispatchScope(action)
   if (groupLabel && !GROUP_LABEL_RE.test(groupLabel)) {
     fail(`invalid group label '${groupLabel}' — must match [A-Za-z0-9_-]{1,32}`)
     return
   }
-
+  // A soft group was auto-minted by the CLI from the caller's session id.
+  // Nobody asked for isolation. It homes tab creation, policy reuse and the
+  // idle sweep, but must never become a hard isolation gate: empty-group
+  // resolution falls back to the active tab (as ungrouped requests always
+  // have), and explicit --tab targets are gated like ungrouped requests.
   if (!tabId && needsTab(action.type)) {
     tabId = await getActiveTabId(groupLabel)
-    if (tabId && groupLabel) {
+    if (tabId && groupHard) {
       // Stored per-group target may be dead (tab closed outside group_close) or
       // no longer a member of the group; validate MEMBERSHIP (not mere existence)
       // and fall through to the group's own tabs otherwise — this also self-heals
       // a stale key.
       let stillInGroup = false
-      try { stillInGroup = await isTabInNamedGroup(tabId, groupLabel) } catch {}
+      try { stillInGroup = await isTabInNamedGroup(tabId, groupLabel!) } catch {}
       if (!stillInGroup) tabId = undefined
+    } else if (tabId && groupSoft) {
+      // Automatic scope is not an isolation boundary: the session's targeting
+      // chain survives as long as the tab EXISTS, whichever group holds it
+      // (it may legitimately point at a fallback-resolved default-group tab).
+      try { await chrome.tabs.get(tabId) } catch { tabId = undefined }
     }
   }
 
@@ -145,34 +210,44 @@ export async function handleDaemonMessage(msg: {
         .sort((a, b) => (b.id as number) - (a.id as number))[0]
       tabId = candidate?.id
     }
-    if (!tabId) {
-      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}'`)
+    if (!tabId && groupHard) {
+      // Explicitly-grouped requests resolve only within their group. Soft
+      // scope (or --any-tab) falls through to the active-tab path below
+      // instead — that IS the pre-derivation behavior for a bare call, and
+      // hard-failing here broke read-the-user's-tab workflows.
+      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}', pass --any-tab to target the active tab, or set INTERCEPTOR_GROUP= (empty) to opt out of group scoping`)
       return
     }
   }
 
   if (!tabId && needsTab(action.type)) {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    // No pre-gate persist here: the post-gate persist below is the only
+    // auto-target write, so a request the group gate rejects (e.g. the
+    // browser-active tab is unmanaged) can never poison the stored target.
+    // A profile with zero windows answers this with [] on current Chrome and
+    // rejects with "No current window" on older builds (issue #162); either
+    // way the useful error names the fix, so both paths go through
+    // noActiveTabError below.
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => [] as chrome.tabs.Tab[])
     tabId = activeTab?.id
-    if (tabId) setActiveTabId(tabId)
   }
 
   if (!tabId && needsTab(action.type)) {
-    fail("no active tab")
+    const windows = await chrome.windows.getAll().catch(() => null)
+    fail(noActiveTabError(windows ? windows.length : null))
     return
   }
 
+  let switchBack = false
   if (tabId && needsTab(action.type) && !action.anyTab) {
-    if (groupLabel) {
-      const inNamed = await isTabInNamedGroup(tabId, groupLabel)
-      if (!inNamed) {
-        fail(`tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`)
-        return
-      }
-    } else {
-      const inAny = await isTabInAnyManagedGroup(tabId)
-      if (!inAny && anyManagedGroupKnown()) {
-        fail(`tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`)
+    const membershipError = await managedTabGateError(tabId, groupLabel, groupHard)
+    if (membershipError) {
+      // One exemption: `tab switch` back to the tab the window was
+      // showing before Interceptor's own switch. The user's tab is never
+      // persisted as an auto-target below.
+      switchBack = action.type === "tab_switch" && await consumeSwitchBack(tabId, groupLabel)
+      if (!switchBack) {
+        fail(membershipError)
         return
       }
     }
@@ -181,7 +256,7 @@ export async function handleDaemonMessage(msg: {
   // Persist the auto-target only AFTER the group gate has passed — a rejected
   // cross-group request must never poison another group's (or the global)
   // auto-target key.
-  if (tabId) setActiveTabId(tabId, groupLabel)
+  if (tabId && !switchBack) setActiveTabId(tabId, groupLabel)
 
   if (SENSITIVE_ACTIONS.has(action.type) && tabId && action.expectedUrl) {
     const urlErr = await verifyTabUrl(tabId, action.expectedUrl as string)
@@ -192,6 +267,12 @@ export async function handleDaemonMessage(msg: {
       return
     }
   }
+
+  // Only accepted tab activity refreshes the idle timer. Invalid labels,
+  // empty hard groups, stale ids, rejected cross-group targets, and stale
+  // expected-URL requests must not keep a group alive. Metadata polls such as
+  // status/group_list never count.
+  if (needsTab(action.type) || action.type === "tab_create") recordGroupActivity(groupLabel ?? "")
 
   try {
     const result = await routeAction(action, tabId!)

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { RunnerChannel } from "../daemon/ios/channel"
+import { parseIosPoint } from "../daemon/ios/manager"
 import { IosRefRegistry, formatWdaTree, frameCenter, type WdaSourceNode } from "../daemon/ios/tree"
 
 // Locks the InterceptorRunner WS protocol: the manager sends
@@ -13,6 +14,11 @@ function fakeSocket() {
 }
 
 describe("RunnerChannel WS protocol", () => {
+  test("coordinate drags accept x,y points without mistaking refs for points", () => {
+    expect(parseIosPoint("120.5,330")).toEqual({ x: 120.5, y: 330 })
+    expect(parseIosPoint("e12")).toBeUndefined()
+  })
+
   test("tap sends an op frame with coordinates and resolves on success", async () => {
     const { sent, ws } = fakeSocket()
     const ch = new RunnerChannel(ws)
@@ -59,6 +65,15 @@ describe("RunnerChannel WS protocol", () => {
     expect(sent[0].op).toBe("windowSize")
     ch.handleResponse(sent[0].id, { success: true, data: { width: 390, height: 844 } })
     expect(await p).toEqual({ x: 0, y: 0, width: 390, height: 844 })
+  })
+
+  test("pressButton returns the runner's observed device result", async () => {
+    const { sent, ws } = fakeSocket()
+    const ch = new RunnerChannel(ws)
+    const p = ch.pressButton("lock")
+    expect(sent[0]).toMatchObject({ op: "press", name: "lock" })
+    ch.handleResponse(sent[0].id, { success: true, data: { via: "iohid", locked: false } })
+    expect(await p).toEqual({ via: "iohid", locked: false })
   })
 
   test("app launch is an 'app' op with action+bundleId", async () => {

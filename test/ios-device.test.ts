@@ -73,7 +73,7 @@ describe("ios action-type sets are disjoint and complete", () => {
     for (const t of IOS_ACTION_TYPES) expect(IOS_VERB_TYPES.has(t)).toBe(false)
   })
   test("expected verbs present", () => {
-    for (const v of ["ios_tree", "ios_click", "ios_type", "ios_screenshot", "ios_app", "ios_press"]) {
+    for (const v of ["ios_tree", "ios_click", "ios_type", "ios_screenshot", "ios_app", "ios_press", "ios_eval"]) {
       expect(IOS_VERB_TYPES.has(v)).toBe(true)
     }
   })

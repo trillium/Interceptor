@@ -58,7 +58,7 @@ function browserInstalled(target: "chrome" | "brave" | "edge" | "vivaldi"): bool
   if (target === "edge" || target === "vivaldi") return false
   const candidates = target === "chrome"
     ? ["google-chrome", "google-chrome-stable"]
-    : ["brave-browser"]
+    : ["brave-browser", "brave"]
   return candidates.some(b => spawnSync("command", ["-v", b], { shell: true }).status === 0)
 }
 

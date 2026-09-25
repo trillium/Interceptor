@@ -23,6 +23,38 @@ export function rewriteCspEvalError(raw: string | undefined): string | undefined
   ].join("\n  ")
 }
 
+// Chrome's messaging errors leak through when a click starts a navigation (the
+// content script that would answer is torn down with the old document) or when
+// the extension's service worker was replaced mid-request. 276 agent results in
+// the 2026-09-10 session review carried the raw text. Substitute the fragment
+// (composed messages keep their context) and name the recovery once.
+const CHROME_MESSAGING_FRAGMENTS: Array<[RegExp, string]> = [
+  [/\bThe message port closed before a response was received\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bA listener indicated an asynchronous response by returning true, but the message channel closed before a response was received\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bmessage channel is closed\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bCould not establish connection\. Receiving end does not exist\.?/i, "no content script answered in that tab (still loading, or a page Interceptor cannot inject into)"],
+]
+
+export function isChromeMessagingError(raw: string | undefined): boolean {
+  return !!raw && CHROME_MESSAGING_FRAGMENTS.some(([re]) => re.test(raw))
+}
+
+export function rewriteChromeMessagingError(raw: string | undefined): string | undefined {
+  if (!raw) return raw
+  let out = raw
+  let hit = false
+  for (const [re, text] of CHROME_MESSAGING_FRAGMENTS) {
+    if (re.test(out)) { out = out.replace(re, text); hit = true }
+  }
+  if (!hit) return raw
+  return `${out.replace(/[.\s]+$/, "")}. Run 'interceptor read' for the current page state before retrying.`
+}
+
+/** Every error string shown to an agent passes through here once. */
+export function humanizeError(raw: string | undefined): string | undefined {
+  return rewriteChromeMessagingError(rewriteCspEvalError(raw))
+}
+
 export function formatState(data: {
   url: string
   title: string
@@ -48,15 +80,61 @@ export function formatCookies(cookies: { name: string; value: string; domain: st
   return cookies.map(c => `${c.domain}${c.path}  ${c.name}=${c.value}`).join("\n")
 }
 
-export function formatResult(result: { success: boolean; error?: string; data?: unknown }, jsonMode: boolean): string {
+export function formatFind(data: {
+  text?: { total: number; returned: number; truncated?: boolean; matches: Array<{ frameId?: number; start: number; matchedText: string; snippet: string }> }
+  elements?: { total: number; returned: number; truncated?: boolean; matches: Array<{ frameId?: number; refId: string; role: string; name: string; score: number }> }
+  frames?: Array<{ frameId: number; opaque?: true; error?: string }>
+}): string {
+  const lines: string[] = []
+  if (data.text) {
+    lines.push(`TEXT (${data.text.returned}/${data.text.total}${data.text.truncated ? ", truncated" : ""})`)
+    for (const match of data.text.matches) {
+      const frame = match.frameId !== undefined ? ` frame=${match.frameId}` : ""
+      lines.push(`- [${match.start}]${frame} ${match.snippet}`)
+    }
+    if (data.text.returned === 0) lines.push("- no matches")
+  }
+  if (data.elements) {
+    if (lines.length) lines.push("")
+    lines.push(`ELEMENTS (${data.elements.returned}/${data.elements.total}${data.elements.truncated ? ", truncated" : ""})`)
+    for (const match of data.elements.matches) {
+      const frame = match.frameId !== undefined ? ` frame=${match.frameId}` : ""
+      lines.push(`- [${match.refId}] ${match.role} \"${match.name}\" score=${match.score}${frame}`)
+    }
+    if (data.elements.returned === 0) lines.push("- no matches")
+  }
+  const opaque = data.frames?.filter(frame => frame.opaque) || []
+  if (opaque.length) {
+    if (lines.length) lines.push("")
+    lines.push("UNREACHABLE FRAMES")
+    for (const frame of opaque) lines.push(`- frame=${frame.frameId}: ${frame.error || "unreachable"}`)
+  }
+  return lines.join("\n") || "no matches"
+}
+
+export function formatResult(result: { success: boolean; error?: string; data?: unknown; warning?: string }, jsonMode: boolean): string {
   if (jsonMode) return JSON.stringify(result, null, 2)
 
   if (!result.success) {
-    const cleaned = rewriteCspEvalError(result.error)
-    return `error: ${cleaned}`
+    const cleaned = humanizeError(result.error)
+    const lines = [`error: ${cleaned}`]
+    // A refusal's `data.hint` is the actionable part (the trusted-input
+    // foreground guard names the background-safe path there); text mode is
+    // what agents read, so it must not stay JSON-only.
+    const hint = (result.data as { hint?: unknown } | undefined)?.hint
+    if (typeof hint === "string" && hint.length > 0) lines.push(`hint: ${hint}`)
+    // A failed result can carry a side-effect disclosure too (the CSP recovery
+    // that reloaded the tab and still failed); it is as important as on success.
+    if (result.warning) lines.push(`warning: ${result.warning}`)
+    return lines.join("\n")
   }
-  if (result.data === undefined || result.data === null) return "ok"
-  if (typeof result.data === "string") return result.data
-  if (typeof result.data === "number" || typeof result.data === "boolean") return String(result.data)
-  return JSON.stringify(result.data, null, 2)
+  let body: string
+  if (result.data === undefined || result.data === null) body = "ok"
+  else if (typeof result.data === "string") body = result.data
+  else if (typeof result.data === "number" || typeof result.data === "boolean") body = String(result.data)
+  else body = JSON.stringify(result.data, null, 2)
+  // Handlers put actionable hints (trusted-retry suggestions, side-effect
+  // disclosures) in `warning`; dropping it in text mode hid them from every
+  // non-JSON caller.
+  return result.warning ? `${body}\nwarning: ${result.warning}` : body
 }

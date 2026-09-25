@@ -46,9 +46,21 @@ struct Permission {
 
 final class TrustDomain: DomainHandler, @unchecked Sendable {
     private let microphoneProvider: MicrophoneAuthorizationProvider
+    // Signing-status seam (issue #163 follow-up): ad-hoc-signed bridges
+    // lose their TCC grants on every rebuild while the System Settings row
+    // stays visibly on. Surfacing the signature here lets `macos trust`
+    // warn once instead of the user debugging the target app.
+    private let signingProvider: any SigningInfoProvider
+    // AXIsProcessTrusted[/WithOptions] route through the
+    // transport (the one Accessibility C-call surface).
+    private let transport: any AXTransport = LiveAXTransport()
 
-    init(microphoneProvider: MicrophoneAuthorizationProvider = LiveMicrophoneAuthorizationProvider()) {
+    init(
+        microphoneProvider: MicrophoneAuthorizationProvider = LiveMicrophoneAuthorizationProvider(),
+        signingProvider: any SigningInfoProvider = LiveSigningInfoProvider()
+    ) {
         self.microphoneProvider = microphoneProvider
+        self.signingProvider = signingProvider
     }
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -162,6 +174,8 @@ final class TrustDomain: DomainHandler, @unchecked Sendable {
             pendingUserAction.append("Speech Recognition")
         }
 
+        let signing = signingProvider.signingInfo()
+
         var result: [String: Any] = [
             "accessibility": accessibilityStatus.rawValue,
             "screenRecording": screenStatus.rawValue,
@@ -169,8 +183,17 @@ final class TrustDomain: DomainHandler, @unchecked Sendable {
             "speechRecognition": speechStatus.rawValue,
             "permissions": permissions.map { $0.toDictionary() },
             "bundlePath": Bundle.main.bundlePath,
-            "displayName": displayName
+            "displayName": displayName,
+            "signing": signing.toDictionary()
         ]
+
+        if signing.adhoc {
+            result["warnings"] = [
+                "Bridge binary is ad-hoc signed: TCC grants are pinned to this exact build (cdhash) "
+                + "and will NOT survive a rebuild. A System Settings row may exist without applying. "
+                + "Install the signed build for durable grants."
+            ]
+        }
 
         if !actionRequired.isEmpty {
             result["action_required"] = actionRequired
@@ -206,9 +229,9 @@ final class TrustDomain: DomainHandler, @unchecked Sendable {
         if prompt {
             let key = "AXTrustedCheckOptionPrompt" as CFString
             let options = [key: true] as CFDictionary
-            trusted = AXIsProcessTrustedWithOptions(options)
+            trusted = transport.isProcessTrustedWithOptions(options)
         } else {
-            trusted = AXIsProcessTrusted()
+            trusted = transport.isProcessTrusted()
         }
         return PermissionStatus.fromBool(trusted)
     }

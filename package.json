@@ -1,6 +1,6 @@
 {
   "name": "interceptor",
-  "version": "0.22.2",
+  "version": "1.0.17",
   "type": "module",
   "license": "Elastic-2.0",
   "bin": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "./scripts/build.sh",
-    "typecheck": "bunx tsc -p tsconfig.host.json && bunx tsc -p tsconfig.extension.json && bunx tsc -p tsconfig.json",
+    "typecheck": "bun x tsc -p tsconfig.host.json && bun x tsc -p tsconfig.extension.json && bun x tsc -p tsconfig.json",
     "test": "bun test",
     "audit:capability-blind": "bash scripts/audit-capability-blind.sh",
     "daemon": "bun run daemon/index.ts",
@@ -22,6 +22,10 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "tesseract.js": "^7.0.0"
+  },
+  "patchedDependencies": {
+    "@modelcontextprotocol/sdk@1.29.0": "patches/@modelcontextprotocol%2Fsdk@1.29.0.patch"
   }
 }

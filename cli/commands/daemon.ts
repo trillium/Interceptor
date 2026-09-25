@@ -1,211 +1,152 @@
-/**
- * cli/commands/daemon.ts — daemon lifecycle management
- *
- * Supports `interceptor daemon kill` — gracefully shut down the daemon,
- * clean up PID/lock/socket files, and report what was done. Idempotent:
- * running with no daemon prints "no daemon running" and exits 0.
- */
-
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
-import { IS_WIN, SOCKET_PATH, PID_PATH, LOCK_PATH, WS_PORT } from "../../shared/platform"
+import { accessSync, constants, existsSync } from "node:fs"
 import { readLockFile, type LockFileData } from "../../daemon/lifecycle"
+import { IPC_PORT, LOCK_PATH, WS_PORT } from "../../shared/platform"
+import { sendCommand } from "../transport"
 
-type KillResult = {
-  success: boolean
-  message: string
-  pid?: number
-  cleaned?: string[]
+export type DaemonStopOptions = {
+  reason: string
+  timeoutMs: number
 }
 
-async function killDaemonProcess(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, "SIGTERM")
-    // Give it a moment to shut down gracefully
-    await new Promise(r => setTimeout(r, 500))
-    // Verify it's gone via kill(pid, 0)
-    try {
-      process.kill(pid, 0)
-      // Still alive; force kill
-      process.kill(pid, "SIGKILL")
-      await new Promise(r => setTimeout(r, 200))
-    } catch {
-      // Already dead, good
+export type DaemonStopResult = {
+  stopped: boolean
+  alreadyStopped: boolean
+  pid: number | null
+  reason: string
+}
+
+export function parseDaemonStopArgs(args: string[]): DaemonStopOptions {
+  if (args[0] !== "daemon" || args[1] !== "stop") {
+    throw new Error("usage: interceptor daemon stop [--reason installer|manual] [--timeout 10000]")
+  }
+  const allowedFlags = new Set(["--reason", "--timeout", "--json"])
+  for (let index = 2; index < args.length; index++) {
+    const arg = args[index]
+    if (!arg.startsWith("--")) throw new Error(`unexpected daemon argument '${arg}'`)
+    const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg
+    if (!allowedFlags.has(name)) throw new Error(`unknown daemon stop flag '${name}'`)
+    if ((name === "--reason" || name === "--timeout") && !arg.includes("=")) index++
+  }
+
+  const readFlag = (name: string, fallback: string): string => {
+    const exact = args.indexOf(name)
+    if (exact >= 0) {
+      const value = args[exact + 1]
+      if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`)
+      return value
     }
+    const prefix = `${name}=`
+    const joined = args.find(arg => arg.startsWith(prefix))
+    return joined ? joined.slice(prefix.length) : fallback
+  }
+
+  const reason = readFlag("--reason", "manual")
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(reason)) throw new Error("--reason must be a short lowercase identifier")
+  const timeoutRaw = readFlag("--timeout", "10000")
+  if (!/^\d+$/.test(timeoutRaw)) throw new Error("--timeout must be an integer number of milliseconds")
+  const timeoutMs = Number(timeoutRaw)
+  if (timeoutMs < 100 || timeoutMs > 60_000) throw new Error("--timeout must be between 100 and 60000 milliseconds")
+  return { reason, timeoutMs }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
     return true
   } catch {
     return false
   }
 }
 
-function readPidFromFile(pidPath: string): number | null {
+async function tcpPortOpen(port: number, timeoutMs = 150): Promise<boolean> {
+  return await new Promise(resolve => {
+    let settled = false
+    const finish = (value: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    void Bun.connect({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          try { socket.end() } catch {}
+          finish(true)
+        },
+        data() {},
+        connectError() { finish(false) },
+        error() { finish(false) },
+      },
+    }).catch(() => finish(false))
+  })
+}
+
+export function validateDaemonStopAcknowledgement(lock: LockFileData, data: unknown): void {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("daemon returned a malformed shutdown acknowledgement")
+  const ack = data as Record<string, unknown>
+  if (ack.accepted !== true || ack.protocolVersion !== 1) throw new Error("daemon rejected the authenticated shutdown request")
+  if (ack.pid !== lock.pid || ack.execPath !== lock.execPath || ack.startedAt !== lock.startedAt) {
+    throw new Error("daemon shutdown acknowledgement does not match the locked process identity")
+  }
+}
+
+async function waitForStopped(lock: LockFileData, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const [ipcOpen, wsOpen] = await Promise.all([tcpPortOpen(IPC_PORT), tcpPortOpen(WS_PORT)])
+    if (!processAlive(lock.pid) && !ipcOpen && !wsOpen) return
+    await Bun.sleep(100)
+  }
+  throw new Error(`daemon did not exit and release ports ${IPC_PORT}/${WS_PORT} within ${timeoutMs}ms`)
+}
+
+export async function stopDaemon(options: DaemonStopOptions): Promise<DaemonStopResult> {
+  if (!existsSync(LOCK_PATH)) {
+    return { stopped: true, alreadyStopped: true, pid: null, reason: options.reason }
+  }
   try {
-    const content = readFileSync(pidPath, "utf-8").trim()
-    const firstLine = content.split("\n")[0]
-    const pid = parseInt(firstLine, 10)
-    return Number.isFinite(pid) && pid > 0 ? pid : null
-  } catch {
-    return null
+    accessSync(LOCK_PATH, constants.R_OK)
+  } catch (err) {
+    if ((err as { code?: string }).code === "EACCES" || (err as { code?: string }).code === "EPERM") {
+      throw new Error("daemon lock file belongs to another user; that account (or the installer) has to stop its daemon")
+    }
   }
+  const lock = readLockFile(LOCK_PATH)
+  if (!lock) throw new Error("daemon lock file is malformed")
+  if (!processAlive(lock.pid)) {
+    return { stopped: true, alreadyStopped: true, pid: lock.pid, reason: options.reason }
+  }
+  if (lock.shutdownProtocolVersion !== 1 || !lock.shutdownToken) {
+    throw new Error("running daemon does not support authenticated shutdown; use the installer legacy migration path")
+  }
+
+  const response = await sendCommand({
+    type: "daemon_shutdown",
+    protocolVersion: 1,
+    token: lock.shutdownToken,
+    reason: options.reason,
+    timeoutMs: options.timeoutMs,
+  })
+  if (!response.result.success) throw new Error(response.result.error || "daemon shutdown failed")
+  validateDaemonStopAcknowledgement(lock, response.result.data)
+  await waitForStopped(lock, options.timeoutMs)
+  return { stopped: true, alreadyStopped: false, pid: lock.pid, reason: options.reason }
 }
 
-function findDaemonPidFromPort(): number | null {
+export async function runDaemonCommand(args: string[], jsonMode: boolean): Promise<void> {
   try {
-    // Try to connect to the WS port to see if something is listening
-    // If the daemon is not responding, kill(pid, 0) on the lock file pid will fail
-    // and we can clean up stale artifacts.
-    return null // Can't directly query port ownership from JS; rely on PID file
-  } catch {
-    return null
+    const options = parseDaemonStopArgs(args)
+    const result = await stopDaemon(options)
+    if (jsonMode) console.log(JSON.stringify({ success: true, ...result }))
+    else if (result.alreadyStopped) console.log("daemon already stopped")
+    else console.log(`daemon stopped (pid ${result.pid})`)
+  } catch (error) {
+    const message = (error as Error).message
+    if (jsonMode) console.log(JSON.stringify({ success: false, error: message }))
+    else console.error(`error: ${message}`)
+    process.exitCode = 1
   }
-}
-
-async function doDaemonKill(): Promise<KillResult> {
-  const cleaned: string[] = []
-  let daemonPid: number | null = null
-
-  // Try to read the PID from the lock file first (has more metadata)
-  const lockData = readLockFile(LOCK_PATH)
-  if (lockData) {
-    daemonPid = lockData.pid
-    // Check if process is still alive
-    try {
-      process.kill(daemonPid, 0)
-      // Process exists, will try to kill it
-    } catch {
-      // Process is dead; treat as stale
-      daemonPid = null
-    }
-  }
-
-  // Fallback: read from PID file
-  if (!daemonPid && existsSync(PID_PATH)) {
-    daemonPid = readPidFromFile(PID_PATH)
-    if (daemonPid) {
-      try {
-        process.kill(daemonPid, 0)
-      } catch {
-        daemonPid = null
-      }
-    }
-  }
-
-  // No daemon found
-  if (!daemonPid) {
-    // Clean up stale artifacts anyway
-    if (existsSync(PID_PATH)) {
-      try {
-        unlinkSync(PID_PATH)
-        cleaned.push(PID_PATH)
-      } catch {}
-    }
-    if (existsSync(LOCK_PATH)) {
-      try {
-        unlinkSync(LOCK_PATH)
-        cleaned.push(LOCK_PATH)
-      } catch {}
-    }
-    if (!IS_WIN && existsSync(SOCKET_PATH)) {
-      try {
-        unlinkSync(SOCKET_PATH)
-        cleaned.push(SOCKET_PATH)
-      } catch {}
-    }
-
-    const msg = cleaned.length > 0
-      ? `no daemon running, cleaned ${cleaned.length} stale artifact(s)`
-      : "no daemon running"
-    return { success: true, message: msg, cleaned }
-  }
-
-  // Kill the daemon
-  const killed = await killDaemonProcess(daemonPid)
-
-  // Clean up files
-  if (existsSync(PID_PATH)) {
-    try {
-      unlinkSync(PID_PATH)
-      cleaned.push(PID_PATH)
-    } catch {}
-  }
-  if (existsSync(LOCK_PATH)) {
-    try {
-      unlinkSync(LOCK_PATH)
-      cleaned.push(LOCK_PATH)
-    } catch {}
-  }
-  if (!IS_WIN && existsSync(SOCKET_PATH)) {
-    try {
-      unlinkSync(SOCKET_PATH)
-      cleaned.push(SOCKET_PATH)
-    } catch {}
-  }
-
-  if (!killed) {
-    return {
-      success: false,
-      message: `failed to kill daemon (pid ${daemonPid}); stale artifacts may remain`,
-      pid: daemonPid,
-      cleaned,
-    }
-  }
-
-  return {
-    success: true,
-    message: `killed daemon (pid ${daemonPid}), cleaned ${cleaned.length} artifact(s)`,
-    pid: daemonPid,
-    cleaned,
-  }
-}
-
-export async function runDaemonCommand(filtered: string[], jsonMode: boolean): Promise<null> {
-  // Skip global flags when finding the subcommand
-  let subcommand: string | undefined
-  for (let i = 1; i < filtered.length; i++) {
-    const arg = filtered[i]
-    // Skip known global flags and their values
-    if (arg === "--json" || arg === "--context" || arg === "--tab" || arg === "--group" || arg === "--frame" || arg === "--no-skills-hint") {
-      if (arg === "--context" || arg === "--tab" || arg === "--group" || arg === "--frame") i++ // these take a value
-      continue
-    }
-    if (arg.startsWith("--")) continue // skip unknown flags
-    subcommand = arg
-    break
-  }
-
-  if (!subcommand || subcommand === "kill" || subcommand === "teardown") {
-    const result = await doDaemonKill()
-
-    if (jsonMode) {
-      console.log(JSON.stringify(result))
-    } else {
-      console.log(result.message)
-    }
-
-    if (!result.success) {
-      process.exit(1)
-    }
-  } else if (subcommand === "--help" || subcommand === "-h") {
-    console.log(
-      "interceptor daemon — daemon lifecycle management\n" +
-      "\n" +
-      "  interceptor daemon              Gracefully shut down the daemon and clean up runtime files\n" +
-      "  interceptor daemon kill         Same as above (explicit subcommand)\n" +
-      "  interceptor daemon --help       Print this help\n" +
-      "\n" +
-      "Behavior:\n" +
-      "  - Sends SIGTERM to the daemon process, waits for graceful shutdown\n" +
-      "  - Falls back to SIGKILL if the daemon doesn't respond to SIGTERM\n" +
-      "  - Removes PID file, lock file, and control socket\n" +
-      "  - Idempotent: running with no daemon prints 'no daemon running' and exits 0\n" +
-      "  - Handles stale lock files: removes orphaned artifacts if the process is dead\n" +
-      "\n" +
-      "Flags:\n" +
-      "  --json        Output structured result as JSON\n"
-    )
-  } else {
-    console.error(`error: unknown daemon subcommand '${subcommand}'. Run 'interceptor daemon --help' for usage.`)
-    process.exit(1)
-  }
-
-  return null
 }

@@ -1,26 +1,81 @@
-import { resolveElement, scrollIntoViewIfNeeded, dispatchClickSequence, waitForMutation } from "../input-simulation"
+import { resolveElement, scrollIntoViewIfNeeded, dispatchClickSequence, waitForMutation, staleElementError } from "../input-simulation"
 import { getOrAssignRef } from "../ref-registry"
+import { queryAllDeep } from "../deep-query"
 import { getEffectiveRole, getAccessibleName } from "../a11y-tree"
 
 type Action = { type: string; [key: string]: unknown }
-type ActionResult = { success: boolean; error?: string; warning?: string; data?: unknown }
+// refId: structured ref of the acted-on element, for callers (the background
+// router's OS-click escalation) that need to re-target it without parsing
+// the human-facing data string.
+type ActionResult = { success: boolean; error?: string; warning?: string; data?: unknown; refId?: string }
 
 export async function handleClick(action: Action): Promise<ActionResult> {
   const el = resolveElement(action.index as number | undefined, action.ref as string | undefined)
-  if (!el) return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` }
+  if (!el) return staleElementError(action, "clicked")
   scrollIntoViewIfNeeded(el)
+  // Register the observer before the dispatch: both dispatch paths are
+  // synchronous, so a listener that mutates inline would otherwise be missed
+  // and the click would escalate as "no DOM change" (review 2026-09-07).
+  const mutation = waitForMutation(200)
   dispatchClickSequence(el, action.x as number | undefined, action.y as number | undefined)
   const clickMsg = `clicked [${action.ref || action.index}]${action.x !== undefined ? ` at (${action.x},${action.y})` : ""}`
-  const mutated = await waitForMutation(200)
+  const mutated = await mutation
   if (!mutated) {
     return { success: true, data: clickMsg, warning: "no DOM change after click — if the site requires trusted events, try: interceptor click --trusted " + (action.ref || action.index) }
   }
   return { success: true, data: clickMsg }
 }
 
+/**
+ * Click by CSS selector.
+ *
+ * The gap this closes: `handleClick` resolves only a11y refs and indices, so a
+ * page whose accessibility tree is empty is unclickable even when `query`
+ * locates the element perfectly. That is not hypothetical — perplexity.ai
+ * answer pages return an empty tree while `query "button span"` finds the
+ * sources control exactly, so the sources panel could be seen and never opened.
+ *
+ * `nth` disambiguates rather than guessing: a selector matching several
+ * elements is a caller error to surface, not one to silently resolve to the
+ * first match, so the count comes back in the error.
+ */
+export async function handleClickSelector(action: Action): Promise<ActionResult> {
+  const selector = String(action.selector ?? "")
+  if (!selector) return { success: false, error: "click_selector: no selector given" }
+  let matches: Element[]
+  try {
+    // Shadow-piercing: a launcher button inside a web component's shadow root
+    // is invisible to document.querySelectorAll, so the click silently found
+    // nothing on exactly the widgets most worth clicking. Light-DOM matches
+    // still come first, so `nth` keeps its meaning on pages without shadow
+    // hosts. See ../deep-query.
+    matches = queryAllDeep(selector)
+  } catch {
+    return { success: false, error: `click_selector: invalid CSS selector ${JSON.stringify(selector)}` }
+  }
+  const nth = typeof action.nth === "number" ? action.nth : 0
+  const el = matches[nth] as HTMLElement | undefined
+  if (!el) {
+    return {
+      success: false,
+      error: `click_selector: ${selector} matched ${matches.length} element(s); no index ${nth}`,
+    }
+  }
+  scrollIntoViewIfNeeded(el)
+  const mutation = waitForMutation(200)
+  dispatchClickSequence(el, action.x as number | undefined, action.y as number | undefined)
+  const clickedRef = getOrAssignRef(el)
+  const mutated = await mutation
+  const msg = `clicked ${clickedRef} — ${selector}[${nth}] of ${matches.length}`
+  if (!mutated) {
+    return { success: true, data: msg, refId: clickedRef, warning: `no DOM change after click — if the site requires trusted events, try: interceptor click --trusted ${clickedRef}` }
+  }
+  return { success: true, data: msg, refId: clickedRef }
+}
+
 export async function handleDblclick(action: Action): Promise<ActionResult> {
   const el = resolveElement(action.index as number | undefined, action.ref as string | undefined)
-  if (!el) return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` }
+  if (!el) return staleElementError(action, "double-clicked")
   scrollIntoViewIfNeeded(el)
   dispatchClickSequence(el, action.x as number | undefined, action.y as number | undefined)
   const rect = el.getBoundingClientRect()
@@ -32,7 +87,7 @@ export async function handleDblclick(action: Action): Promise<ActionResult> {
 
 export async function handleRightclick(action: Action): Promise<ActionResult> {
   const el = resolveElement(action.index as number | undefined, action.ref as string | undefined)
-  if (!el) return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` }
+  if (!el) return staleElementError(action, "right-clicked")
   scrollIntoViewIfNeeded(el)
   const rect = el.getBoundingClientRect()
   const x = action.x !== undefined ? rect.left + (action.x as number) : rect.left + rect.width / 2

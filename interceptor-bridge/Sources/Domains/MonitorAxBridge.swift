@@ -45,6 +45,9 @@ final class MonitorAxBridge: @unchecked Sendable {
     ]
 
     private let lock = NSLock()
+    // observer create/add/remove/run-loop and attribute reads
+    // route through the transport (removes the `as! AXValue` casts in mergeFrame).
+    private let transport: any AXTransport = LiveAXTransport()
     private var observers: [pid_t: AXObserver] = [:]
     private var registered: [pid_t: [String]] = [:]
     private var callback: EventCallback?
@@ -92,18 +95,17 @@ final class MonitorAxBridge: @unchecked Sendable {
         }
         lock.unlock()
 
-        var newObserver: AXObserver?
-        let createStatus = AXObserverCreate(pid, MonitorAxBridge.cCallback, &newObserver)
+        let (createStatus, newObserver) = transport.observerCreate(pid: pid, callback: MonitorAxBridge.cCallback)
         guard createStatus == .success, let observer = newObserver else {
             Platform.log("MonitorAxBridge: AXObserverCreate failed for pid \(pid) → \(createStatus.rawValue)")
             return []
         }
 
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         var accepted: [String] = []
         for note in notifications {
-            let st = AXObserverAddNotification(observer, axApp, note as CFString, refcon)
+            let st = transport.observerAddNotification(observer, axApp, note, refcon)
             if st == .success {
                 accepted.append(note)
             }
@@ -117,7 +119,7 @@ final class MonitorAxBridge: @unchecked Sendable {
         // doesn't have to cross an isolation boundary.
         CFRunLoopAddSource(
             CFRunLoopGetMain(),
-            AXObserverGetRunLoopSource(observer),
+            transport.observerGetRunLoopSource(observer),
             .defaultMode
         )
 
@@ -135,13 +137,13 @@ final class MonitorAxBridge: @unchecked Sendable {
         lock.unlock()
 
         guard let observer = observerOpt else { return }
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         for note in registeredNotes {
-            AXObserverRemoveNotification(observer, axApp, note as CFString)
+            _ = transport.observerRemoveNotification(observer, axApp, note)
         }
         CFRunLoopRemoveSource(
             CFRunLoopGetMain(),
-            AXObserverGetRunLoopSource(observer),
+            transport.observerGetRunLoopSource(observer),
             .defaultMode
         )
     }
@@ -174,8 +176,8 @@ final class MonitorAxBridge: @unchecked Sendable {
         // element to enrich the event. We deliberately avoid reading kAXValue
         // for kAXSecureTextField — the role is read first and the value is
         // masked.
-        var pid: pid_t = 0
-        AXUIElementGetPid(element, &pid)
+        let (_, pidOpt) = transport.pid(element)
+        let pid: pid_t = pidOpt ?? 0
 
         var role: String?
         var subrole: String?
@@ -310,9 +312,8 @@ final class MonitorAxBridge: @unchecked Sendable {
     }
 
     private func readStringAttribute(_ element: AXUIElement, _ key: String, into target: inout String?) {
-        var ref: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, key as CFString, &ref)
-        if status == .success, let v = ref as? String {
+        let (status, ref) = transport.copyAttributeValue(element, key)
+        if status == .success, let v = AXValueCodec.displayString(ref) {
             target = v
         }
     }
@@ -320,18 +321,10 @@ final class MonitorAxBridge: @unchecked Sendable {
     private func mergeFrame(_ element: AXUIElement, into data: inout [String: Any]) {
         // kAXPositionAttribute is CGPoint, kAXSizeAttribute is CGSize.
         // Both are AXValueRefs and need AXValueGetValue to extract.
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef)
-        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef)
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        if let p = posRef, CFGetTypeID(p) == AXValueGetTypeID() {
-            AXValueGetValue(p as! AXValue, .cgPoint, &origin)
-        }
-        if let s = sizeRef, CFGetTypeID(s) == AXValueGetTypeID() {
-            AXValueGetValue(s as! AXValue, .cgSize, &size)
-        }
+        let (_, posRef) = transport.copyAttributeValue(element, kAXPositionAttribute as String)
+        let (_, sizeRef) = transport.copyAttributeValue(element, kAXSizeAttribute as String)
+        let origin = AXValueCodec.point(from: posRef) ?? .zero
+        let size = AXValueCodec.size(from: sizeRef) ?? .zero
         data["frame"] = [
             "x": Int(origin.x),
             "y": Int(origin.y),

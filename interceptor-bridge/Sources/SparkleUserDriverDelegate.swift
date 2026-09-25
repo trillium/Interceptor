@@ -161,8 +161,8 @@ final class SparkleUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 
     // Use Sparkle's default install/relaunch decision. In 2.9.1, returning
     // false from updaterShouldRelaunchApplication aborts installation itself.
-    // BridgeAppDelegate answers Sparkle's stage-2 quit so the bundle swap
-    // can proceed; the pkg postinstall owns the restart.
+    // main.swift's instance lock excludes a duplicate after pkg postinstall
+    // has started the LaunchAgent-owned bridge.
 
     nonisolated static func noUpdateReason(_ rawValue: Int?) -> String {
         switch rawValue {

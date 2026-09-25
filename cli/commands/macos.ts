@@ -6,9 +6,12 @@
  */
 
 import { existsSync } from "node:fs"
+import { resolve } from "node:path"
+import { bridgePidPathForDetection, bridgeSocketPathForDetection } from "../../shared/bridge-paths"
 import { sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
 import {
   attachMonitorTaskSource,
+  listMonitorTasks,
   markMonitorTaskSourceAttachFailed,
   resolveOrCreateMonitorTask,
   validateMonitorTaskMode,
@@ -24,6 +27,7 @@ import {
 import { runCdpCommand } from "./cdp"
 import { runNativeCommand } from "./native"
 import { extensionMacosPrefixes, extensionActionType } from "../../shared/extensions"
+import { readSecretValue } from "../prompt"
 
 type Action = { type: string; [key: string]: unknown }
 type Result = { success: boolean; error?: string; data?: unknown }
@@ -60,8 +64,8 @@ function bridgePreflightFailure(): string | null {
   // Interceptor-Full-<v>.pkg). Either is sufficient.
   const launchAgentUser = `${home}/Library/LaunchAgents/com.interceptor.bridge.plist`
   const launchAgentSystem = "/Library/LaunchAgents/com.interceptor.bridge.plist"
-  const bridgeSock = "/tmp/interceptor-bridge.sock"
-  const bridgePid = "/tmp/interceptor-bridge.pid"
+  const bridgeSock = bridgeSocketPathForDetection()
+  const bridgePid = bridgePidPathForDetection()
   const launchAgentInstalled = existsSync(launchAgentUser) || existsSync(launchAgentSystem)
   const bridgeReachable = existsSync(bridgeSock) || existsSync(bridgePid)
   if (!launchAgentInstalled && !bridgeReachable) {
@@ -129,6 +133,18 @@ export async function runMacosCommand(
     }
   }
 
+  // issue #244: the vault value comes from a hidden prompt or stdin, never argv;
+  // reveal prints to a human at a terminal only.
+  if (action.type === "macos_secret" && action.sub === "set") {
+    action.value = await readSecretValue(`Value for secret "${action.name}"`, { stdin: action.stdin === true })
+    delete action.stdin
+  }
+  if (action.type === "macos_secret" && action.sub === "reveal") {
+    if (opts.jsonMode) { console.error("error: secret reveal is refused under --json (it prints to a terminal only)"); process.exit(1) }
+    if (process.env.INTERCEPTOR_MCP === "1") { console.error("error: secret reveal is refused over MCP"); process.exit(1) }
+    if (!process.stdout.isTTY) { console.error("error: secret reveal prints to a terminal only (stdout is not a TTY)"); process.exit(1) }
+  }
+
   const result = await send(action, opts.globalTabId, opts.useWs)
 
   if (!result.success) {
@@ -136,6 +152,10 @@ export async function runMacosCommand(
       markMonitorTaskSourceAttachFailed(pendingMonitorTaskId, undefined, result.error || "macos monitor start failed")
     }
     console.error("error:", result.error || "unknown error")
+    // Bridge errors may carry an actionable `remediation` command (e.g. the
+    // Accessibility trust gate, monitor's TCC preflight). Surface it.
+    const remediation = (result as Record<string, unknown>).remediation
+    if (typeof remediation === "string") console.error("fix:", remediation)
     process.exit(1)
   }
 
@@ -198,6 +218,36 @@ export async function runMacosCommand(
     }
   }
 
+  // A sid-addressed stop bypasses the task epilogue above (snapshot +
+  // synthesis + grading), which is why a later `task quality` used to grade an
+  // empty transcript with no pointer to the missing step (#218). Name the
+  // owning task and the path forward.
+  if (action.type === "macos_monitor" && action.sub === "stop" && typeof action.taskRef !== "string") {
+    const sid = typeof action.sid === "string" ? action.sid
+      : typeof (result.data as Record<string, unknown> | undefined)?.sid === "string"
+        ? (result.data as Record<string, unknown>).sid as string
+        : undefined
+    if (sid) {
+      try {
+        const owner = listMonitorTasks().find((task) => task.sourceSessions?.some((s) => s.sid === sid))
+        if (owner) {
+          console.error(
+            `note: session ${sid} belongs to task ${owner.taskId} — ` +
+            `'interceptor macos monitor stop --task ${owner.taskId}' auto-snapshots and grades; ` +
+            `to finish now run 'interceptor monitor task snapshot ${owner.taskId}' then 'interceptor monitor task quality ${owner.taskId}'.`,
+          )
+        }
+      } catch {}
+    }
+  }
+
+  if (action.type === "macos_secret" && action.sub === "reveal") {
+    const value = (result.data as { value?: unknown } | undefined)?.value
+    if (typeof value !== "string") { console.error("error: no value returned"); process.exit(1) }
+    console.log(value)
+    return
+  }
+
   if (opts.jsonMode) {
     console.log(JSON.stringify(result.data, null, 2))
   } else if (typeof result.data === "string") {
@@ -229,6 +279,11 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
         pid: flagInt(filtered, "--pid"),
         filter: flagVal(filtered, "--filter") || "interactive",
         depth: flagInt(filtered, "--depth") || 10,
+        // help advertises `--max-chars`; forward it (was dropped).
+        maxChars: flagInt(filtered, "--max-chars") || 50000,
+        // traversal bounds (bridge clamps to the safety hard caps; omit ⇒ defaults).
+        maxNodes: flagInt(filtered, "--max-nodes"),
+        maxMs: flagInt(filtered, "--max-ms"),
       }
 
     case "find": {
@@ -238,7 +293,10 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
         type: "macos_find",
         query,
         app: flagVal(filtered, "--app"),
+        pid: flagInt(filtered, "--pid"),          // was dropped
         role: flagVal(filtered, "--role"),
+        maxNodes: flagInt(filtered, "--max-nodes"),
+        maxMs: flagInt(filtered, "--max-ms"),
       }
     }
 
@@ -268,10 +326,10 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
     }
 
     case "focused":
-      return { type: "macos_focused", app: flagVal(filtered, "--app") }
+      return { type: "macos_focused", app: flagVal(filtered, "--app"), pid: flagInt(filtered, "--pid") }
 
     case "windows":
-      return { type: "macos_windows", app: flagVal(filtered, "--app") }
+      return { type: "macos_windows", app: flagVal(filtered, "--app"), pid: flagInt(filtered, "--pid") }
 
     // ── Text ──
     case "text": {
@@ -404,13 +462,28 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
     }
 
     case "type": {
+      const typeApp = flagVal(filtered, "--app")
+      const typePid = flagInt(filtered, "--pid")
+      // issue #244: `--secret <name>` delivers a vault value by name. The daemon
+      // resolves it after logging; the CLI never sees the value.
+      if (filtered.includes("--secret")) {
+        const secretName = flagVal(filtered, "--secret")
+        if (!secretName || secretName.startsWith("--")) { console.error("error: --secret requires a secret name"); process.exit(1) }
+        const positionals = collectPositionals(filtered, 2, new Set(["--secret", "--app", "--pid"]))
+        const ref = positionals[0] && /^e\d+$/.test(positionals[0]) ? positionals[0] : undefined
+        const literal = ref ? positionals.slice(1) : positionals
+        if (literal.length) { console.error("error: --secret and literal text are mutually exclusive"); process.exit(1) }
+        const action: Action = { type: "macos_type", secret: secretName }
+        if (ref) action.ref = ref
+        if (typeApp) action.app = typeApp
+        if (typePid !== undefined) action.pid = typePid
+        return action
+      }
       const refOrText = filtered[2]
       if (!refOrText) { console.error("error: interceptor macos type requires text or ref + text"); process.exit(1) }
       const action: Action = /^e\d+$/.test(refOrText) && filtered[3]
         ? { type: "macos_type", ref: refOrText, text: filtered[3] }
         : { type: "macos_type", text: refOrText }
-      const typeApp = flagVal(filtered, "--app")
-      const typePid = flagInt(filtered, "--pid")
       if (typeApp) action.app = typeApp
       if (typePid !== undefined) action.pid = typePid
       return action
@@ -568,10 +641,21 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
     // ── Vision ──
     case "vision": {
       const op = filtered[2] || "text"
+      const app = flagVal(filtered, "--app")
+      const image = flagVal(filtered, "--image")
+      // A dropped --image would recognize whatever window is frontmost and report success.
+      if (filtered.includes("--image") && (!image || image.startsWith("--"))) {
+        console.error("error: interceptor macos vision --image requires a path to an image file"); process.exit(1)
+      }
+      if (image && app) {
+        console.error("error: interceptor macos vision takes --image <path> or --app <name>, not both"); process.exit(1)
+      }
       const action: Action = {
         type: "macos_vision",
         sub: op,
-        app: flagVal(filtered, "--app"),
+        app,
+        // The bridge's working directory is "/", so a relative path means the caller's.
+        imagePath: image ? resolve(image) : undefined,
       }
       // diagnostic: dump the captured image to disk so the operator
       // can see what Vision actually fed VNRecognizeTextRequest. Off by
@@ -942,6 +1026,10 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
             query,
             scope: flagVal(filtered, "--scope"),
             limit: flagInt(filtered, "--limit") || 50,
+            // Spotlight deadline (default 10 s in the bridge). The result carries
+            // partial:true when the deadline cut a pass; the CLI transport
+            // timeout for this verb is derived from it (cli/transport.ts).
+            timeoutMs: flagInt(filtered, "--timeout-ms"),
           }
           // --paths /a,/b,/c — multi-root search (only valid with --scope path).
           // Repeating --paths is also accepted; entries are concatenated.
@@ -1683,6 +1771,75 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       return action
     }
 
+    // issue #244: the secret vault. Values never appear on argv: `register`
+    // opens the bridge's native box, `set` reads stdin or a hidden prompt.
+    case "secret": {
+      const verb = filtered[2]
+      const verbs = ["register", "set", "list", "rm", "status", "unlock", "lock", "reveal"]
+      if (!verb || !verbs.includes(verb)) {
+        console.error(`error: secret requires a verb (${verbs.join("|")})`)
+        console.error("  interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <seconds>]")
+        console.error("  interceptor macos secret set <name> --stdin [same flags]      (value from stdin; TTY prompt without --stdin)")
+        console.error("  interceptor macos secret list | status | rm <name> | unlock <name> --for 30m | lock [<name>] | reveal <name>")
+        process.exit(1)
+      }
+      const action: Action = { type: "macos_secret", sub: verb }
+      const name = filtered[3] && !filtered[3].startsWith("--") ? filtered[3] : undefined
+      if (["register", "set", "rm", "unlock", "reveal"].includes(verb) && !name) {
+        console.error(`error: secret ${verb} requires a <name>`); process.exit(1)
+      }
+      if (name) action.name = name
+      if ((verb === "register" || verb === "set") && filtered[4] && !filtered[4].startsWith("--")) {
+        console.error("error: never pass the secret value on argv (it lands in shell history and ps). Use 'secret register <name>' for the box, or 'secret set <name> --stdin'.")
+        process.exit(1)
+      }
+      if (verb === "register" || verb === "set") {
+        const gate = flagVal(filtered, "--gate")
+        if (gate) action.gate = gate
+        const targets = collectMulti(filtered, "--target").flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean)
+        if (targets.length) action.targets = targets
+        const reuse = flagInt(filtered, "--reuse")
+        if (reuse !== undefined) action.reuseSeconds = reuse
+        if (verb === "set" && filtered.includes("--stdin")) action.stdin = true
+      }
+      if (verb === "unlock") {
+        const dur = flagVal(filtered, "--for")
+        if (!dur) { console.error("error: secret unlock requires --for <duration> (e.g. 30m, 2h)"); process.exit(1) }
+        action.for = dur
+      }
+      return action
+    }
+
+    // issue #244: `interceptor macos sudo --secret <name> [--keep] -- <command...>`
+    // The daemon pipes the vault value to `sudo -S` stdin.
+    case "sudo": {
+      const sep = filtered.indexOf("--")
+      const head = sep === -1 ? filtered : filtered.slice(0, sep)
+      const cmd = sep === -1 ? [] : filtered.slice(sep + 1)
+      const secretName = flagVal(head, "--secret")
+      if (!secretName || secretName.startsWith("--")) { console.error("error: interceptor macos sudo requires --secret <name> -- <command...>"); process.exit(1) }
+      if (cmd.length === 0) { console.error("error: interceptor macos sudo requires a command after --"); process.exit(1) }
+      const action: Action = { type: "macos_sudo", secret: secretName, cmd }
+      if (head.includes("--keep")) action.keep = true
+      return action
+    }
+
+    // issue #244: fill the macOS administrator prompt (SecurityAgent) from the vault.
+    case "authdialog": {
+      const verb = filtered[2]
+      if (!verb || !["fill", "status"].includes(verb)) {
+        console.error("error: authdialog requires a verb (fill --secret <name> [--submit] | status)"); process.exit(1)
+      }
+      const action: Action = { type: "macos_authdialog", sub: verb }
+      if (verb === "fill") {
+        const secretName = flagVal(filtered, "--secret")
+        if (!secretName || secretName.startsWith("--")) { console.error("error: authdialog fill requires --secret <name>"); process.exit(1) }
+        action.secret = secretName
+        if (filtered.includes("--submit")) action.submit = true
+      }
+      return action
+    }
+
     case "auth": {
       const verb = filtered[2]
       if (!verb) { console.error("error: auth requires a verb (status|confirm|invalidate|domain-state)"); process.exit(1) }
@@ -1771,7 +1928,7 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       // remap to album_type. --limit/--offset must be int-typed because
       // PhotosDomain casts them with `as? Int` (verified — string casts
       // silently drop the value, causing accidental full-library fetches).
-      for (const flag of ["--level","--name","--media","--subtype","--since","--until","--where","--out","--size","--asset","--file","--album","--token"]) {
+      for (const flag of ["--level","--name","--media","--subtype","--since","--until","--where","--out","--asset","--file","--album","--token","--format"]) {
         const val = flagVal(filtered, flag)
         if (val !== undefined) action[flag.replace(/^--/, "").replace(/-/g, "_")] = val
       }
@@ -1779,6 +1936,11 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       if (pType !== undefined) action.album_type = pType
       const pLimit = flagInt(filtered, "--limit"); if (pLimit !== undefined) action.limit = pLimit
       const pOffset = flagInt(filtered, "--offset"); if (pOffset !== undefined) action.offset = pOffset
+      // Same `as? Int` trap the --limit/--offset comment above describes: PhotosDomain
+      // reads --size with `as? Int`, so passing it as a string silently drops it. That
+      // made export's resize+JPEG branch unreachable from the CLI (it always fell
+      // through to the raw-original branch) and pinned thumbnail to its 256px default.
+      const pSize = flagInt(filtered, "--size"); if (pSize !== undefined) action.size = pSize
       if (filtered.includes("--favorite")) action.favorite = true
       if (filtered.includes("--hidden")) action.hidden = true
       if (filtered.includes("--burst")) action.burst = true

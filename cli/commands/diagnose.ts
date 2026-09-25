@@ -20,16 +20,36 @@
  * when Chrome appears open and the extension appears loaded.
  */
 
-import { existsSync, readFileSync } from "node:fs"
-import { readStatusSnapshot } from "../lib/status-renderer"
+import { readFileSync } from "node:fs"
+import { readStatusSnapshot, installedNmhManifests, describeEvalMain, formatEvalMainLine, type EvalMainState } from "../lib/status-renderer"
 import { sendCommand } from "../transport"
 import { listSessions } from "./monitor"
 import { readLockFile, type LockFileData } from "../../daemon/lifecycle"
 import { LOCK_PATH } from "../../shared/platform"
+import { IOS_CONTEXT_PREFIX } from "../../shared/ios-device"
+import { CDP_CONTEXT_PREFIX } from "../../shared/cdp-app"
+import { VERSION } from "../version"
+import {
+  installTypeLabel,
+  isPreStoreVersion,
+  isStoreManaged,
+  LEGACY_DEVELOPMENT_EXTENSION_ID,
+  STORE_LISTING_URL,
+} from "../../shared/extension-identity"
 
-const NMH_PATHS: Record<string, string> = {
-  chrome: `${process.env.HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.interceptor.host.json`,
-  brave:  `${process.env.HOME}/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.interceptor.host.json`,
+/** Where the installers leave the unpacked copy (the developer path). */
+export const UNPACKED_EXTENSION_DIR = process.platform === "win32"
+  ? "%LOCALAPPDATA%\\Programs\\Interceptor\\extension"
+  : "/Library/Application Support/Interceptor/extension"
+
+/** What the daemon knows about the extension behind a context. */
+export type ContextIdentity = {
+  version?: string
+  extensionId?: string
+  /** chrome.management installType: development = unpacked, normal = store. */
+  installType?: string
+  /** The native-messaging relay Chrome spawned belongs to this extension ID. */
+  native?: boolean
 }
 
 type BinaryMismatch = {
@@ -40,9 +60,94 @@ type BinaryMismatch = {
 
 type ContextProbe = {
   contextId: string
-  extension: { reachable: boolean; reason?: string }
+  kind: "extension" | "ios" | "cdp"
+  extension: { reachable: boolean; reason?: string; evalMain?: EvalMainState } & ContextIdentity
   tab: { id: number; url: string; title: string } | null
   elements: number | null
+}
+
+/**
+ * Issue #241: a pkg install replaces the extension on disk, but a running
+ * browser keeps executing the OLD extension snapshot until it is reloaded. The
+ * symptom is a CLI that reports one version while the extension behaves like
+ * an older one (e.g. asking for a bundle file the build no longer ships). The
+ * daemon now records the version each extension registered with; when it
+ * differs from this CLI's, say so and name the fix.
+ */
+export function extensionVersionMismatchLine(
+  contextId: string,
+  extensionVersion: string | undefined,
+  cliVersion: string,
+  installType?: string,
+): string | null {
+  if (!extensionVersion || extensionVersion === cliVersion) return null
+  if (isStoreManaged(installType)) {
+    // A store copy has only what the Chrome Web Store published; reload asks the
+    // store for an update (chrome.runtime.requestUpdateCheck) and cannot go past it.
+    return `⚠ extension snapshot ${extensionVersion} ≠ CLI ${cliVersion} — this is the Chrome Web Store copy, so a reload alone cannot change its code; run 'interceptor reload --context ${contextId}' to ask the store for an update (Chrome installs it once the extension is idle), or click Update on chrome://extensions with Developer mode on. If the store has not published ${cliVersion} yet, load the unpacked copy from ${UNPACKED_EXTENSION_DIR} instead.`
+  }
+  const base = `⚠ extension snapshot ${extensionVersion} ≠ CLI ${cliVersion} — the browser is still running the old extension; run 'interceptor reload --context ${contextId}' and retry.`
+  // A copy older than 0.25.0 cannot say which copy it is (that field is new).
+  // If it is the unpacked one, the reload loads the store-keyed files: a new
+  // extension ID to Chrome, so its storage (context name, tab-group label,
+  // lifecycle) starts empty. Say so before the user loses the name.
+  if (!installType && isPreStoreVersion(extensionVersion)) {
+    return `${base} This copy predates the store identity: an unpacked copy comes back from the reload under the store extension ID with empty settings, so restore its name afterwards with 'interceptor contexts rename ${contextId} --context <new id>'; a Chrome Web Store copy updates when the store publishes ${cliVersion}.`
+  }
+  return base
+}
+
+/** The pre-store development ID still connects (its origin stays allowed through
+ *  0.25.x) but it is a second copy next to the store-ID one; name it. */
+export function legacyDevelopmentCopyLine(contextId: string, extensionId: string | undefined): string | null {
+  if (extensionId !== LEGACY_DEVELOPMENT_EXTENSION_ID) return null
+  return `⚠ context ${contextId} is the pre-store development copy (id ${extensionId}); it keeps working through 0.25.x. Remove it on chrome://extensions, then load ${UNPACKED_EXTENSION_DIR} again or install ${STORE_LISTING_URL}, and restore its name with 'interceptor contexts rename ${contextId} --context <new id>'.`
+}
+
+/** Text for the CLI's "unknown action type" failure: the connected extension
+ *  predates a verb this CLI sends. Copy-specific when the daemon knows the copy. */
+export function staleExtensionHintLine(cliVersion: string, ctx?: ContextIdentity & { contextId?: string }): string {
+  if (!ctx?.version && !ctx?.installType) {
+    return `hint: the browser is running an Interceptor extension older than this CLI (${cliVersion}). Unpacked copy: run 'interceptor reload' (or reload it on chrome://extensions). Chrome Web Store copy: 'interceptor reload' asks the store for an update, which only helps once the store carries ${cliVersion}; until then load the unpacked copy from ${UNPACKED_EXTENSION_DIR}. 'interceptor diagnose' names the connected copy and its version.`
+  }
+  const label = installTypeLabel(ctx.installType)
+  const version = ctx.version ?? "of unknown version"
+  const target = ctx.contextId ? ` --context ${ctx.contextId}` : ""
+  if (isStoreManaged(ctx.installType)) {
+    return `hint: the ${label} extension ${version} is older than this CLI (${cliVersion}); a Chrome Web Store copy only changes when the store publishes a new version. Run 'interceptor reload${target}' to ask the store for an update, or load the unpacked copy from ${UNPACKED_EXTENSION_DIR}.`
+  }
+  return `hint: the ${label} extension ${version} is older than this CLI (${cliVersion}); run 'interceptor reload${target}' (or reload it on chrome://extensions) and retry.`
+}
+
+type ContextListEntry = { contextId: string } & ContextIdentity
+
+async function listContextIdentities(): Promise<ContextListEntry[]> {
+  // verbose: true → [{contextId, kind, version, …}] on a current daemon; an
+  // older daemon ignores the flag and returns plain ids — accept both.
+  const resp = await probeWithTimeout(() => sendCommand({ type: "contexts", verbose: true }))
+  const raw = resp?.result.success && Array.isArray(resp.result.data)
+    ? (resp.result.data as Array<string | ContextListEntry>)
+    : []
+  return raw.map(entry => typeof entry === "string" ? { contextId: entry } : entry)
+}
+
+/** Resolve the connected copy for the stale-extension hint; falls back to the
+ *  generic text when the context cannot be determined. */
+export async function staleExtensionHint(cliVersion: string, contextId?: string): Promise<string> {
+  const exts = (await listContextIdentities()).filter(c => contextKind(c.contextId) === "extension")
+  const ctx = contextId ? exts.find(c => c.contextId === contextId) : (exts.length === 1 ? exts[0] : undefined)
+  return staleExtensionHintLine(cliVersion, ctx)
+}
+
+// `contexts` returns extension ids plus ios:/cdp: manager contexts. Browser
+// probes (tab_list / get_a11y_tree) only make sense against extension
+// contexts — an ios:/cdp: id appearing in the list is already proof the
+// device/app is connected, and probing it with browser verbs would render a
+// misleading "extension not responding".
+function contextKind(contextId: string | undefined): ContextProbe["kind"] {
+  if (contextId?.startsWith(IOS_CONTEXT_PREFIX)) return "ios"
+  if (contextId?.startsWith(CDP_CONTEXT_PREFIX)) return "cdp"
+  return "extension"
 }
 
 type DiagnoseSnapshot = {
@@ -79,11 +184,10 @@ function readNmhManifestPath(manifestFile: string): string | null {
   }
 }
 
-function detectBinaryMismatches(lock: LockFileData | null): BinaryMismatch[] {
+export function detectBinaryMismatches(lock: LockFileData | null): BinaryMismatch[] {
   if (!lock?.execPath) return []
   const mismatches: BinaryMismatch[] = []
-  for (const [browser, manifestFile] of Object.entries(NMH_PATHS)) {
-    if (!existsSync(manifestFile)) continue
+  for (const { browser, manifestFile } of installedNmhManifests()) {
     const manifestPath = readNmhManifestPath(manifestFile)
     if (manifestPath && manifestPath !== lock.execPath) {
       mismatches.push({ browser, manifestPath, runningPath: lock.execPath })
@@ -92,14 +196,31 @@ function detectBinaryMismatches(lock: LockFileData | null): BinaryMismatch[] {
   return mismatches
 }
 
-async function probeContext(contextId: string | undefined): Promise<ContextProbe> {
+export async function probeContext(contextId: string | undefined, identity?: ContextIdentity): Promise<ContextProbe> {
   const label = contextId ?? "default"
+  const kind = contextKind(contextId)
 
-  const [tabResp, treeResp] = await Promise.all([
+  if (kind !== "extension") {
+    // Presence in the `contexts` list means the manager holds a live
+    // registration for this device/app; report it without browser probes.
+    return {
+      contextId: label,
+      kind,
+      extension: { reachable: true },
+      tab: null,
+      elements: null,
+    }
+  }
+
+  const [tabResp, treeResp, capsResp] = await Promise.all([
     probeWithTimeout(() => sendCommand({ type: "tab_list" }, undefined, contextId)),
     probeWithTimeout(() =>
       sendCommand({ type: "get_a11y_tree", filter: "interactive", depth: 3, maxChars: 100_000 }, undefined, contextId)
     ),
+    // Page-world eval availability (chrome.userScripts + the Chrome 138+
+    // "Allow User Scripts" toggle). The extension already knew; diagnose
+    // never showed it, so agents hit CSP/"unavailable" errors blind.
+    probeWithTimeout(() => sendCommand({ type: "capabilities" }, undefined, contextId)),
   ])
 
   let extension: ContextProbe["extension"] = { reachable: false }
@@ -125,12 +246,17 @@ async function probeContext(contextId: string | undefined): Promise<ContextProbe
     elements = (treeResp.result.data.match(/\be\d+\b/g) ?? []).length
   }
 
-  return { contextId: label, extension, tab, elements }
+  if (identity?.version) extension.version = identity.version
+  if (identity?.extensionId) extension.extensionId = identity.extensionId
+  if (identity?.installType) extension.installType = identity.installType
+  if (identity?.native) extension.native = true
+  if (capsResp?.result.success) extension.evalMain = describeEvalMain(capsResp.result.data, identity?.extensionId)
+  return { contextId: label, kind, extension, tab, elements }
 }
 
 export async function runDiagnoseCommand(jsonMode: boolean, contextId?: string): Promise<void> {
   const status = readStatusSnapshot()
-  const lock = status.daemon ? readLockFile(LOCK_PATH) : null
+  const lock = readLockFile(LOCK_PATH)
 
   const snap: DiagnoseSnapshot = {
     daemon: {
@@ -138,24 +264,24 @@ export async function runDiagnoseCommand(jsonMode: boolean, contextId?: string):
       pid: status.pid,
       ...(lock ? { execPath: lock.execPath, version: lock.version, startedAt: lock.startedAt } : {}),
     },
-    binaryMismatches: status.daemon ? detectBinaryMismatches(lock) : [],
+    binaryMismatches: detectBinaryMismatches(lock),
     contexts: [],
     monitor: { active: 0, total: 0 },
   }
 
   if (status.daemon) {
-    if (contextId) {
-      snap.contexts = [await probeContext(contextId)]
-    } else {
-      const contextsResp = await probeWithTimeout(() => sendCommand({ type: "contexts" }))
-      const contextIds =
-        contextsResp?.result.success && Array.isArray(contextsResp.result.data)
-          ? (contextsResp.result.data as string[])
-          : []
+    const contexts = await listContextIdentities()
+    const identityOf = (id: string | undefined): ContextIdentity | undefined => {
+      const c = contexts.find(entry => entry.contextId === id)
+      return c ? { version: c.version, extensionId: c.extensionId, installType: c.installType, native: c.native } : undefined
+    }
 
+    if (contextId) {
+      snap.contexts = [await probeContext(contextId, identityOf(contextId))]
+    } else {
       snap.contexts = await Promise.all(
-        contextIds.length > 0
-          ? contextIds.map(id => probeContext(id))
+        contexts.length > 0
+          ? contexts.map(c => probeContext(c.contextId, identityOf(c.contextId)))
           : [probeContext(undefined)]
       )
     }
@@ -205,13 +331,29 @@ export async function runDiagnoseCommand(jsonMode: boolean, contextId?: string):
       if (multiCtx) lines.push(`context ${ctx.contextId}:`)
       const indent = multiCtx ? "  " : ""
 
+      if (ctx.kind !== "extension") {
+        lines.push(`${indent}${ctx.kind === "ios" ? "ios device" : "cdp app"}: connected`)
+        continue
+      }
+
+      const ext = ctx.extension
+      // "(extension 0.24.2)" for a copy that did not say what it is; otherwise
+      // "(store extension 0.25.0 via ws + native)" so the copy and its
+      // transports are visible at a glance.
+      const copy = ext.installType ? `${installTypeLabel(ext.installType)} extension` : "extension"
+      const transport = ext.installType || ext.extensionId ? (ext.native ? " via ws + native" : " via ws") : ""
       lines.push(
         `${indent}extension: ${
-          ctx.extension.reachable
+          ext.reachable
             ? "connected"
-            : `disconnected${ctx.extension.reason ? `  (${ctx.extension.reason})` : ""}`
-        }`
+            : `disconnected${ext.reason ? `  (${ext.reason})` : ""}`
+        }${ext.version ? `  (${copy} ${ext.version}${transport})` : ""}`
       )
+      const mismatch = extensionVersionMismatchLine(ctx.contextId, ext.version, VERSION, ext.installType)
+      if (mismatch) lines.push(`${indent}${mismatch}`)
+      if (ext.reachable) lines.push(`${indent}${formatEvalMainLine(ext.evalMain)}`)
+      const legacy = legacyDevelopmentCopyLine(ctx.contextId, ext.extensionId)
+      if (legacy) lines.push(`${indent}${legacy}`)
 
       if (ctx.tab) {
         const { id, url, title } = ctx.tab
