@@ -6,6 +6,19 @@
 import { COMMAND_SPECS } from "./manifest"
 
 const COMMAND_HELP: Record<string, string> = {
+  update: [
+    "interceptor update — update Interceptor itself",
+    "",
+    "  interceptor update             macOS: check now — reports Sparkle's selected version or no-update reason",
+    "  interceptor update status      macOS: check result, selected version, lifecycle phase, feed, and schedule",
+    "",
+    "Notes:",
+    "  - macOS: requires the full install (the updater lives in the bridge app); browser-only",
+    "    installs get 'interceptor upgrade --full' guidance instead. A found update keeps",
+    "    Sparkle's visible prompt; a slow check returns 'checking' and status records its result.",
+    "  - Windows: updates ship as a signed installer — this command prints the Releases link",
+    "    (run the newer architecture-matched Setup; downgrades are refused).",
+  ].join("\n"),
   save: [
     "interceptor save — write page-produced bytes to disk (no downloads shelf, Save dialog, clipboard, or CDP)",
     "",
@@ -132,6 +145,7 @@ const MAP_UPGRADE = `macOS + iPhone control are NOT enabled on this browser-only
 
 const MAP_FOOTER = `LOCAL (no browser needed):
   status · init · daemon (manage daemon lifecycle) · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
+  update — update Interceptor itself (fires the Sparkle update check; 'update status' shows the schedule)
 
 GLOBAL FLAGS (any command, any position — flag order never changes meaning):
   --json  --context <id>  --tab <id>  --group <label>  --frame <id>  --all-surfaces

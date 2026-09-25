@@ -148,6 +148,13 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "tab", surface: "browser", usage: "interceptor tab new|close|activate|reload […]", summary: "Tab lifecycle", returns: "ok / tab info." },
   { name: "tab designate", surface: "browser", usage: "interceptor tab designate [id]", summary: "Pin a tab as this session's working tab (default: the most recently opened interceptor-managed tab, falling back to any tab if none are managed). Persists for the whole session; scoped per --group so concurrent agents in different groups keep independent designations.", returns: "{tab_id, designated: true}. Used by 'read' when called with no --tab." },
   { name: "tab self", surface: "browser", usage: "interceptor tab self", summary: "Print the session's designated tab id", returns: "{tab_id} — errors if no tab has been designated." },
+  {
+    name: "update", surface: "local",
+    usage: "interceptor update [status]",
+    summary: "Update Interceptor itself — checks with Sparkle and reports its selected version or no-update result (full install only)",
+    returns: "check: started, concluded, outcome, phase, selected/latest version or error, and feed. status: the same observed lifecycle plus lastCheck, automaticChecks, checkInterval, canCheckForUpdates, and sessionInProgress.",
+    example: "interceptor update",
+  },
   { name: "network", surface: "browser", usage: "interceptor net [--filter <pattern>] [--limit <n>] [--format har|json|pcapng --out <path>]", summary: "Passive network log", returns: "Recent requests (method, url, status, type); exportable to HAR/pcapng." },
   { name: "headers", surface: "browser", usage: "interceptor headers [--filter <pattern>]", summary: "Request headers seen", returns: "Header sets per request." },
   { name: "screenshot", surface: "browser", usage: "interceptor screenshot [e<ref>] [--save] [--format png|jpeg|webp] [--quality <n>]", summary: "Screenshot page/element", returns: "Image (saved to disk with --save; path on stderr)." },

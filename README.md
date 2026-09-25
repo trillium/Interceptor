@@ -82,6 +82,8 @@ Two installers ship per release. Pick the one that matches what you actually nee
 
 Both download from the same [Releases](https://github.com/Hacker-Valley-Media/Interceptor/releases) page. Start with **Browser** unless you know you need native macOS commands — you can always upgrade to Full later via `interceptor upgrade --full`.
 
+**Updating:** run `interceptor update`. It waits briefly for Sparkle and reports the selected update version, a no-update reason, or the real error — never a bare "check fired" success. If the feed is slow it returns `checking`; `interceptor update status` then shows the latest outcome, selected version, lifecycle phase, feed, and schedule. Full installs also auto-check in the background. When an update is found, an agent can drive Sparkle's prompt like any other window (`interceptor macos read --app interceptor-bridge`, then `interceptor macos act <ref>` on **Install Update**; re-read for a fresh ref before acting on **Install and Relaunch**); the final install step always asks for an administrator password, which a person must enter.
+
 ### Install steps
 
 1. Download the matching `.pkg` from Releases.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { timeoutMessage } from "../cli/transport"
+import { timeoutMessage, pickTimeoutForAction, INTERCEPTOR_TIMEOUT_MS } from "../cli/transport"
 import { resolveEffectiveTabId } from "../cli/commands/tabs"
 
 // robots-m0ay: a registered-but-silent browser context must fail with the
@@ -26,6 +26,16 @@ describe("cli transport timeoutMessage", () => {
     expect(timeoutMessage("ios_tree", 60000, "stable")).toContain("InterceptorRunner")
   })
 
+  test("macos_update outwaits the bounded 10s Sparkle conclusion window", () => {
+    // UpdateDomain.beginCheck waits up to 10s for the delegate conclusion
+    // before returning a truthful `checking` result; the CLI must not time
+    // out first and misreport a slow feed as a transport failure.
+    expect(pickTimeoutForAction("macos_update")).toBe(20_000)
+  })
+
+  test("unlisted actions fall back to the default timeout", () => {
+    expect(pickTimeoutForAction("tab_list")).toBe(INTERCEPTOR_TIMEOUT_MS)
+  })
   test("cdp/app contexts name the endpoint, not the browser extension", () => {
     for (const ctx of ["cdp:Slack", "app:Slack"]) {
       const msg = timeoutMessage("read", 15000, ctx)

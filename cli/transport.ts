@@ -16,6 +16,9 @@ export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT |
 // chart and fall back to a weaker secondary source. 45s lets the vision rung
 // of the deep-research escalation chain actually complete.
 const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+  // A manual update check waits up to 10s for Sparkle's delegate conclusion
+  // before returning a truthful `checking` result. Leave transport headroom.
+  macos_update: 20_000,
   macos_listen: 60_000,
   macos_vad: 60_000,
   // monitor start/stop can do non-trivial setup/teardown (AX
@@ -48,7 +51,7 @@ const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   ocr: 60_000,
 }
 
-function pickTimeoutForAction(actionType: string): number {
+export function pickTimeoutForAction(actionType: string): number {
   return ACTION_TIMEOUT_OVERRIDES_MS[actionType] ?? INTERCEPTOR_TIMEOUT_MS
 }
 

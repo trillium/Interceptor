@@ -64,6 +64,7 @@ const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
 const IOS_CMDS = new Set(["ios"])
+const UPDATE_CMDS = new Set(["update"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const INIT_CMDS = new Set(["init"])
 const RESEARCH_CMDS = new Set(["research"])
@@ -87,7 +88,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS, ...IOS_CMDS,
-  ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
+  ...UPDATE_CMDS, ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...DAEMON_CMDS,
   "help", "contexts",
 ])
@@ -221,9 +222,13 @@ async function main() {
 
   // fail fast (before any daemon spawn) when a surface is not
   // part of this install. Override with --all-surfaces / INTERCEPTOR_ALL_SURFACES.
-  if (MACOS_CMDS.has(cmd) || IOS_CMDS.has(cmd)) {
+  // `update` rides the macos surface: Sparkle lives in the bridge, so a mac
+  // browser-only install gets the upgrade hint instead of a bridge error.
+  // On win32 `update` skips the gate — its dispatch branch prints the
+  // Windows installer guidance instead of the macOS-only hint.
+  if (MACOS_CMDS.has(cmd) || IOS_CMDS.has(cmd) || (UPDATE_CMDS.has(cmd) && process.platform !== "win32")) {
     const surfaces = detectSurfaces(args)
-    const available = MACOS_CMDS.has(cmd) ? surfaces.macos : surfaces.ios
+    const available = IOS_CMDS.has(cmd) ? surfaces.ios : surfaces.macos
     if (!available) {
       console.error(`error: ${SURFACE_UPGRADE_HINT}`)
       process.exit(1)
@@ -235,6 +240,11 @@ async function main() {
   if (cmd !== "skills" && cmd !== "manifest") maybeEmitSkillsHint(args)
 
   let needsDaemon = !NO_DAEMON.has(cmd)
+  // win32 `update` prints static installer guidance — no daemon involved
+  // (on macOS it routes through the daemon to the bridge's Sparkle updater).
+  if (UPDATE_CMDS.has(cmd) && process.platform === "win32") {
+    needsDaemon = false
+  }
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
     needsDaemon = false
   }
@@ -257,6 +267,29 @@ async function main() {
 
   // Dispatch to command module
   let action: { type: string; [key: string]: unknown } | null
+
+  if (UPDATE_CMDS.has(cmd)) {
+    // `interceptor update` is the front door for updating Interceptor itself
+    // sugar for the retained-but-hidden
+    // `interceptor macos update check` — a background Sparkle check via the
+    // bridge that reports Sparkle's selected version, no-update result, or
+    // error. `interceptor update status` passes through to the lifecycle state.
+    //
+    // Windows has no Sparkle: updates ship as a signed installer (run a
+    // newer architecture-matched Setup; the surface gate's macOS-only
+    // upgrade hint would be nonsense here).
+    if (process.platform === "win32") {
+      const msg = {
+        message: "Windows updates ship as a signed installer — download the latest Interceptor-Browser-<version>-windows-<arch>.exe and run Setup (upgrades preserve the install directory; downgrades are refused).",
+        releases: "https://github.com/Hacker-Valley-Media/Interceptor/releases",
+      }
+      console.log(jsonMode ? JSON.stringify({ success: true, data: msg }, null, 2) : `${msg.message}\n${msg.releases}`)
+      return
+    }
+    const sub = filtered[1] && !filtered[1].startsWith("-") ? filtered[1] : "check"
+    await runMacosCommand(["macos", "update", sub], { jsonMode, useWs, globalTabId, contextId: globalContextId })
+    return
+  }
 
   if (MACOS_CMDS.has(cmd)) {
     await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
