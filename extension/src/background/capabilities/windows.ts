@@ -1,5 +1,4 @@
 import { addTabToInterceptorGroup, addTabToNamedGroup, GROUP_LABEL_RE } from "../tab-group"
-import { boundedTabTitle } from "./tabs"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
@@ -142,7 +141,7 @@ export async function handleWindowActions(
             left: w.left,
             top: w.top,
             incognito: w.incognito,
-            tabs: w.tabs?.map(t => ({ id: t.id, url: t.url, title: boundedTabTitle(t.title), active: t.active })),
+            tabs: w.tabs?.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active })),
           })),
         }
       }
