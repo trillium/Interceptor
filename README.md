@@ -1304,6 +1304,34 @@ The skill packages mirror the surface split:
 - [`.agents/skills/interceptor/`](.agents/skills/interceptor/) — thin index skill: surface decision table + pointers. Kept as a compatibility shim for one release.
 - `.agents/skills/interceptor-windows/` — **reserved path, not yet created.** Slot for the future Windows surface; do not create until the surface ships.
 
+## MCP Server: Python Port (read + local slice)
+
+`cli/mcp/` (imported from the `v0.23.37` upstream tag, unmodified, kept as the reference) is the TypeScript MCP server.
+`python/interceptor_mcp/` is a stdlib-only Python port of one slice of it: the `interceptor_read` and `interceptor_local`
+tools (`local` minus `upgrade`) plus the `interceptor://manifest` resource. Like the reference it is a thin subprocess
+wrapper over the `interceptor` CLI (`--json` and all other args pass through verbatim), fences captured content, injects
+the `INTERCEPTOR_MCP_GROUP` tab group, and gates on the `INTERCEPTOR_MCP_ALLOW` operator allowlist using the tier table
+copied from `cli/mcp/tiers.ts`. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
+
+```bash
+# run the server (newline-delimited JSON-RPC on stdio; no dependencies beyond Python 3.9+)
+PYTHONPATH=python INTERCEPTOR_BIN=./dist/interceptor python3 -m interceptor_mcp          # --no-warm skips the daemon warm-up
+
+# register with a client, e.g. Claude Code
+claude mcp add interceptor -- env PYTHONPATH=$PWD/python python3 -m interceptor_mcp
+```
+
+The conformance suite runs the same cases against the TypeScript reference and the Python port, with the CLI replaced by
+`test/mcp-conformance/fake_interceptor.py`. It covers tree/text/find/screenshot/status/manifest/diagnose, flag and group
+injection, fencing, plus refusal proofs for unknown verbs, tier-gate bypass, and path-traversal verbs / resource URIs
+(a refused call must never reach the CLI).
+
+```bash
+bun install                                              # once; the TS side needs @modelcontextprotocol/sdk
+python3 test/mcp-conformance/test_conformance.py         # both implementations (also: bun run test:mcp-conformance)
+MCP_IMPL=py python3 test/mcp-conformance/test_conformance.py   # Python port only, no bun needed
+```
+
 ## Architecture Notes
 
 No CDP is used for any default operation on the browser surface. Network capture is done by monkey-patching `fetch`/`XHR` in the page's JavaScript context — operating fully in user-space rather than via the debugger protocol. The macOS surface uses Apple-blessed APIs only (Accessibility, ScreenCaptureKit, AVFoundation, Speech, Vision, NaturalLanguage, OSLogStore, NSAppleScript, container runtime). Both surfaces multiplex over the same `interceptor` daemon Unix socket — see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full transport diagram.

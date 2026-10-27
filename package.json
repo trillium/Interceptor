@@ -12,7 +12,8 @@
     "test": "bun test",
     "audit:capability-blind": "bash scripts/audit-capability-blind.sh",
     "daemon": "bun run daemon/index.ts",
-    "cli": "bun run cli/index.ts"
+    "cli": "bun run cli/index.ts",
+    "test:mcp-conformance": "python3 test/mcp-conformance/test_conformance.py"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.9.0",
@@ -22,6 +23,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "tesseract.js": "^7.0.0"
   }
 }
