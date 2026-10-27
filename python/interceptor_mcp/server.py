@@ -1,12 +1,14 @@
-"""Interceptor MCP server (Python stdlib port) — interceptor_read, interceptor_local, manifest resource.
+"""Interceptor MCP server (Python stdlib port).
 
 Mirrors cli/mcp/server.ts: a thin subprocess wrapper around the `interceptor` CLI
 (see adapter.py), gated by the operator allowlist INTERCEPTOR_MCP_ALLOW (tiers.py),
 with content-bearing output fenced (output.py). Speaks newline-delimited JSON-RPC
 (MCP stdio transport).
 
-Out of scope for this slice (present in the TS reference): interceptor_browser /
-_macos / _ios / _raw, `local upgrade`, and the help/extensions resources.
+This slice adds interceptor_browser, interceptor_macos, and interceptor_ios
+(same verb enums and tier gate as the reference). Still absent, matching the
+gate/discovery slices: interceptor_raw, `local upgrade`, and the help/extensions
+resources.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from . import adapter, output, tiers
+from .menus import BROWSER_VERBS, IOS_VERBS, MACOS_VERBS
 
 CALL_TIMEOUT_MS = 660_000
 RESOURCE_TIMEOUT_MS = 30_000
@@ -59,6 +62,9 @@ def _fold(items: list[tuple[str, str]]) -> str:
 READ_VERB_NAMES: list[str] = list(dict.fromkeys(
     v for s in ("browser", "macos", "ios") for v in tiers.READ_VERB_ORDER[s]))
 LOCAL_VERB_NAMES = [v for v, _ in LOCAL_VERBS]
+BROWSER_VERB_NAMES = [v for v, _ in BROWSER_VERBS]
+MACOS_VERB_NAMES = [v for v, _ in MACOS_VERBS]
+IOS_VERB_NAMES = [v for v, _ in IOS_VERBS]
 
 
 def _schema(props: dict, required: list[str]) -> dict:
@@ -75,7 +81,67 @@ def _str(desc: Optional[str] = None, enum: Optional[list[str]] = None) -> dict:
     return d
 
 
+def _bool(desc: Optional[str] = None) -> dict:
+    d: dict = {"type": "boolean"}
+    if desc:
+        d["description"] = desc
+    return d
+
+
+def _args(desc: str) -> dict:
+    return {"type": "array", "items": {"type": "string"}, "description": desc}
+
+
 TOOLS: list[dict] = [
+    {
+        "name": "interceptor_browser",
+        "title": "Interceptor — browser",
+        "description": (
+            "Drive the user's real signed-in Chrome/Brave/Safari via Interceptor (DOM, network, tabs, editors, screenshots). "
+            "verb menu: " + _fold(BROWSER_VERBS) +
+            ". Put sub-args/flags in `args` (see the interceptor://manifest resource for exact flags/returns). "
+            "eval/save run page code and require operator opt-in + confirm."
+        ),
+        "inputSchema": _schema({
+            "verb": _str("browser verb", BROWSER_VERB_NAMES),
+            "args": _args("verb arguments + flags, verbatim"),
+            "context": _str("route to a specific browser context/profile"),
+            "tab": {"type": "number", "description": "target a specific tab id"},
+            "confirm": _bool("required for exec-tier verbs (eval/save) when operator-allowed"),
+        }, ["verb"]),
+    },
+    {
+        "name": "interceptor_macos",
+        "title": "Interceptor — macOS",
+        "description": (
+            "Drive native macOS apps + OS via Interceptor (AX, background input, windows, capture, Apple Events, VM, runtime, personal data). "
+            "verb menu: " + _fold(MACOS_VERBS) +
+            ". Put the sub-verb + flags in `args` (see interceptor://help/macos). "
+            "Destructive/exec verbs (app quit, vm delete, script, runtime, container, share) require operator opt-in + confirm."
+        ),
+        "inputSchema": _schema({
+            "verb": _str("macOS top-level verb", MACOS_VERB_NAMES),
+            "args": _args("sub-verb + arguments + flags, verbatim"),
+            "confirm": _bool("required for destructive/exec verbs when operator-allowed"),
+        }, ["verb"]),
+    },
+    {
+        "name": "interceptor_ios",
+        "title": "Interceptor — iOS",
+        "description": (
+            "Drive an owned, unlocked, Developer-Mode iPhone via Interceptor (UI automation, Instruments telemetry, device services, WebKit). "
+            "verb menu: " + _fold(IOS_VERBS) +
+            ". Put the sub-verb + flags in `args` (see interceptor://help/ios). "
+            "setup/refresh/install/kill/eval/spawn require operator opt-in + confirm."
+        ),
+        "inputSchema": _schema({
+            "verb": _str("iOS verb", IOS_VERB_NAMES),
+            "args": _args("sub-verb + arguments + flags, verbatim"),
+            "device": _str("target device alias or udid (--on)"),
+            "session": _str("web session id (--session) for web verbs"),
+            "confirm": _bool("required for destructive/exec verbs when operator-allowed"),
+        }, ["verb"]),
+    },
     {
         "name": "interceptor_read",
         "title": "Interceptor — read (observational)",
@@ -131,6 +197,9 @@ def _validate(tool: dict, args: Any) -> Optional[str]:
         elif t == "number":
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
                 return f"Invalid input: expected number at {name}"
+        elif t == "boolean":
+            if not isinstance(v, bool):
+                return f"Invalid input: expected boolean at {name}"
         elif t == "array":
             if not isinstance(v, list):
                 return f"Invalid input: expected array at {name}"
@@ -168,6 +237,33 @@ def _run_verb(session: Session, surface: str, verb: str, args: list[str], flags:
     return output.to_result(surface, verb, run.stdout, run.stderr, run.code, session.fence)
 
 
+def _tool_browser(session: Session, a: dict) -> dict:
+    args = a.get("args") or []
+    return _run_verb(
+        session, "browser", a["verb"], args,
+        {"group": session.group, "context": a.get("context"), "tab": a.get("tab"), "confirm": a.get("confirm")},
+        [a["verb"], *args],
+    )
+
+
+def _tool_macos(session: Session, a: dict) -> dict:
+    args = a.get("args") or []
+    return _run_verb(
+        session, "macos", a["verb"], args,
+        {"confirm": a.get("confirm")},
+        ["macos", a["verb"], *args],
+    )
+
+
+def _tool_ios(session: Session, a: dict) -> dict:
+    args = a.get("args") or []
+    return _run_verb(
+        session, "ios", a["verb"], args,
+        {"device": a.get("device"), "session": a.get("session"), "confirm": a.get("confirm")},
+        ["ios", a["verb"], *args],
+    )
+
+
 def _tool_read(session: Session, a: dict) -> dict:
     surface, verb, args = a["surface"], a["verb"], a.get("args") or []
     if verb not in tiers.READ_VERBS.get(surface, ()):
@@ -187,6 +283,9 @@ def _tool_local(session: Session, a: dict) -> dict:
 
 
 _HANDLERS: dict[str, Callable[[Session, dict], dict]] = {
+    "interceptor_browser": _tool_browser,
+    "interceptor_macos": _tool_macos,
+    "interceptor_ios": _tool_ios,
     "interceptor_read": _tool_read,
     "interceptor_local": _tool_local,
 }

@@ -142,6 +142,18 @@ class Conformance:
         self.assertIn("interceptor_local", tools)
         for t in ("interceptor_read", "interceptor_local"):
             self.assertTrue(tools[t]["annotations"]["readOnlyHint"])
+        for name in ("interceptor_browser", "interceptor_macos", "interceptor_ios"):
+            self.assertIn(name, tools)
+            self.assertNotIn("annotations", tools[name], "mutate tools are not read-only")
+        browser = tools["interceptor_browser"]["inputSchema"]["properties"]
+        for v in ("click", "type", "keys", "scroll", "navigate", "tab", "act", "open"):
+            self.assertIn(v, browser["verb"]["enum"])
+        self.assertEqual(browser["confirm"]["type"], "boolean")
+        macos = tools["interceptor_macos"]["inputSchema"]["properties"]
+        ios = tools["interceptor_ios"]["inputSchema"]["properties"]
+        for menu in (macos, ios):
+            for v in ("click", "type", "keys", "scroll", "app"):
+                self.assertIn(v, menu["verb"]["enum"])
         read = tools["interceptor_read"]["inputSchema"]
         self.assertEqual(read["properties"]["surface"]["enum"], ["browser", "macos", "ios"])
         verbs = read["properties"]["verb"]["enum"]
@@ -290,6 +302,100 @@ class Conformance:
             self.assertRefused(self.client.call("interceptor_read", surface="browser", verb=v), "Input validation")
             self.assertRefused(self.client.call("interceptor_local", verb=v), "Input validation")
 
+    def test_mutate_verbs_reach_cli_with_session_flags(self):
+        self.client.call("interceptor_browser", verb="click", args=["e1"])
+        self.client.call("interceptor_browser", verb="type", args=["e2", "hi"])
+        self.client.call("interceptor_browser", verb="keys", args=["Enter"])
+        self.client.call("interceptor_browser", verb="scroll", args=["down"])
+        self.client.call("interceptor_browser", verb="navigate", args=["https://example.test/p"])
+        self.client.call("interceptor_browser", verb="tab", args=["new", "https://example.test/t"])
+        self.client.call("interceptor_browser", verb="act", args=["e3", "typed"])
+        self.client.call("interceptor_browser", verb="click", args=["e1"], context="work", tab=4)
+        self.client.call("interceptor_browser", verb="click", args=["e9", "--group", "mine", "--tab", "9"])
+        self.client.call("interceptor_macos", verb="click", args=["10", "20"])
+        self.client.call("interceptor_macos", verb="type", args=["hello"])
+        self.client.call("interceptor_macos", verb="keys", args=["cmd+c"])
+        self.client.call("interceptor_macos", verb="scroll", args=["down"])
+        self.client.call("interceptor_macos", verb="app", args=["activate", "Safari"])
+        self.client.call("interceptor_ios", verb="click", args=["e1"], device="iphone")
+        self.client.call("interceptor_ios", verb="type", args=["hi"])
+        self.client.call("interceptor_ios", verb="keys", args=["Enter"])
+        self.client.call("interceptor_ios", verb="scroll", args=["down"])
+        self.client.call("interceptor_ios", verb="app", args=["activate", "com.example"],
+                         device="phone", session="web1")
+        self.assertEqual(self.client.calls(), [
+            ["click", "e1", "--group", GROUP],
+            ["type", "e2", "hi", "--group", GROUP],
+            ["keys", "Enter", "--group", GROUP],
+            ["scroll", "down", "--group", GROUP],
+            ["navigate", "https://example.test/p", "--group", GROUP],
+            ["tab", "new", "https://example.test/t", "--group", GROUP],
+            ["act", "e3", "typed", "--group", GROUP],
+            ["click", "e1", "--group", GROUP, "--context", "work", "--tab", "4"],
+            ["click", "e9", "--group", "mine", "--tab", "9"],
+            ["macos", "click", "10", "20"],
+            ["macos", "type", "hello"],
+            ["macos", "keys", "cmd+c"],
+            ["macos", "scroll", "down"],
+            ["macos", "app", "activate", "Safari"],
+            ["ios", "click", "e1", "--on", "iphone"],
+            ["ios", "type", "hi"],
+            ["ios", "keys", "Enter"],
+            ["ios", "scroll", "down"],
+            ["ios", "app", "activate", "com.example", "--on", "phone", "--session", "web1"],
+        ])
+
+    def test_refuses_destructive_and_exec_on_default_allowlist(self):
+        cases = [
+            ("interceptor_browser", {"verb": "eval", "args": ["document.title"]}, "EXEC"),
+            ("interceptor_browser", {"verb": "save", "args": ["--out", "/tmp/x", "blob"]}, "EXEC"),
+            ("interceptor_macos", {"verb": "script", "args": ["beep"]}, "EXEC"),
+            ("interceptor_macos", {"verb": "intent", "args": ["x"]}, "EXEC"),
+            ("interceptor_macos", {"verb": "container", "args": ["run", "img"]}, "EXEC"),
+            ("interceptor_macos", {"verb": "app", "args": ["quit", "Safari"]}, "DESTRUCTIVE"),
+            ("interceptor_macos", {"verb": "app", "args": ["terminate", "Safari"]}, "DESTRUCTIVE"),
+            ("interceptor_macos", {"verb": "vm", "args": ["delete", "box"]}, "DESTRUCTIVE"),
+            ("interceptor_ios", {"verb": "eval", "args": ["1"]}, "EXEC"),
+            ("interceptor_ios", {"verb": "spawn", "args": ["App"]}, "EXEC"),
+            ("interceptor_ios", {"verb": "kill", "args": ["1"]}, "DESTRUCTIVE"),
+            ("interceptor_ios", {"verb": "app", "args": ["terminate", "App"]}, "DESTRUCTIVE"),
+            ("interceptor_ios", {"verb": "setup"}, "DESTRUCTIVE"),
+        ]
+        for tool, arguments, needle in cases:
+            self.client.reset()
+            res = self.client.call(tool, **arguments)
+            self.assertRefused(res, needle)
+        # `raw` is an exec CLI verb but not on the browser menu — schema rejection, still no CLI.
+        self.client.reset()
+        self.assertRefused(self.client.call("interceptor_browser", verb="raw", args=["1"]), "Input validation")
+        # confirm alone cannot lift a tier the operator did not allow
+        self.client.reset()
+        self.assertRefused(
+            self.client.call("interceptor_browser", verb="eval", args=["1"], confirm=True), "EXEC")
+        self.client.reset()
+        self.assertRefused(
+            self.client.call("interceptor_macos", verb="app", args=["quit"], confirm=True), "DESTRUCTIVE")
+
+    def test_allow_without_confirm_still_refuses_exec(self):
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "arbitrary-exec"})
+        try:
+            res = c.call("interceptor_browser", verb="eval", args=["1+1"])
+            self.assertTrue(res.get("isError"), res)
+            self.assertIn("requires confirm:true", text_of(res))
+            self.assertEqual(c.calls(), [])
+            res = c.call("interceptor_macos", verb="script", args=["beep"], confirm=True)
+            self.assertFalse(res.get("isError"), res)
+            self.assertEqual(c.calls(), [["macos", "script", "beep"]])
+        finally:
+            c.close()
+
+    def test_refuses_bad_mutate_input(self):
+        for tool in ("interceptor_browser", "interceptor_macos", "interceptor_ios"):
+            self.assertRefused(self.client.call(tool, verb="../../bin/sh"), "Input validation")
+            self.assertRefused(self.client.call(tool, verb="click", args="e1"), "Input validation")
+            self.assertRefused(self.client.call(tool, verb="click", confirm="yes"), "Input validation")
+        self.assertRefused(self.client.call("interceptor_browser", verb="click", tab="2"), "Input validation")
+
     def test_refuses_path_traversal_resource_uris(self):
         for uri in ("interceptor://manifest/../..", "interceptor://help/a/b", "interceptor://help/%2e%2e",
                     "interceptor://help/%2E%2E/%2e%2e", "interceptor://manifest/x", "file:///etc/passwd",
@@ -315,32 +421,69 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001
         suite.addTests(loader.loadTestsFromTestCase(_make(impl)))
     if len(ENABLED) == 2:
         suite.addTest(CrossImpl("test_same_read_menu"))
+        suite.addTest(CrossImpl("test_same_mutate_menus"))
     if "py" in ENABLED:
         suite.addTest(PythonOnly("test_local_upgrade_not_offered"))
+        suite.addTest(PythonOnly("test_raw_and_help_resources_not_offered"))
     return suite
 
 
 class CrossImpl(unittest.TestCase):
-    def test_same_read_menu(self):
+    def _tools(self):
         menus = {}
         for impl in ENABLED:
             c = Client(impl)
             try:
-                tools = {t["name"]: t for t in c.rpc("tools/list")["result"]["tools"]}
-                menus[impl] = tools["interceptor_read"]["inputSchema"]["properties"]["verb"]["enum"]
+                menus[impl] = {t["name"]: t for t in c.rpc("tools/list")["result"]["tools"]}
             finally:
                 c.close()
-        self.assertEqual(menus["ts"], menus["py"], "read verb menu must match the reference exactly")
+        return menus
+
+    def test_same_read_menu(self):
+        menus = self._tools()
+        self.assertEqual(
+            menus["ts"]["interceptor_read"]["inputSchema"]["properties"]["verb"]["enum"],
+            menus["py"]["interceptor_read"]["inputSchema"]["properties"]["verb"]["enum"],
+            "read verb menu must match the reference exactly")
+
+    def test_same_mutate_menus(self):
+        menus = self._tools()
+        for name in ("interceptor_browser", "interceptor_macos", "interceptor_ios"):
+            ts, py = menus["ts"][name], menus["py"][name]
+            self.assertEqual(ts["description"], py["description"], name)
+            self.assertEqual(ts["title"], py["title"], name)
+            self.assertEqual(
+                ts["inputSchema"]["properties"]["verb"]["enum"],
+                py["inputSchema"]["properties"]["verb"]["enum"],
+                name)
+            self.assertEqual(
+                set(ts["inputSchema"]["properties"]),
+                set(py["inputSchema"]["properties"]),
+                name)
 
 
 class PythonOnly(unittest.TestCase):
-    """The slice deliberately omits `local upgrade` (mutating); the reference still offers it."""
+    """Deliberate omissions versus the reference: local upgrade, raw, discovery resources."""
 
     def test_local_upgrade_not_offered(self):
         c = Client("py")
         try:
             res = c.call("interceptor_local", verb="upgrade")
             self.assertTrue(res["isError"])
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+
+    def test_raw_and_help_resources_not_offered(self):
+        c = Client("py")
+        try:
+            names = {t["name"] for t in c.rpc("tools/list")["result"]["tools"]}
+            self.assertNotIn("interceptor_raw", names)
+            res = c.call("interceptor_raw", args=["eval", "1"])
+            self.assertTrue(res["isError"])
+            self.assertIn("not found", text_of(res))
+            uris = {r["uri"] for r in c.rpc("resources/list")["result"]["resources"]}
+            self.assertEqual(uris, {"interceptor://manifest"})
             self.assertEqual(c.calls(), [])
         finally:
             c.close()

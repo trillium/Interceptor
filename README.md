@@ -1304,14 +1304,18 @@ The skill packages mirror the surface split:
 - [`.agents/skills/interceptor/`](.agents/skills/interceptor/) — thin index skill: surface decision table + pointers. Kept as a compatibility shim for one release.
 - `.agents/skills/interceptor-windows/` — **reserved path, not yet created.** Slot for the future Windows surface; do not create until the surface ships.
 
-## MCP Server: Python Port (read + local slice)
+## MCP Server: Python Port (read, local, and mutate tools)
 
 `cli/mcp/` (imported from the `v0.23.37` upstream tag, unmodified, kept as the reference) is the TypeScript MCP server.
-`python/interceptor_mcp/` is a stdlib-only Python port of one slice of it: the `interceptor_read` and `interceptor_local`
-tools (`local` minus `upgrade`) plus the `interceptor://manifest` resource. Like the reference it is a thin subprocess
-wrapper over the `interceptor` CLI (`--json` and all other args pass through verbatim), fences captured content, injects
-the `INTERCEPTOR_MCP_GROUP` tab group, and gates on the `INTERCEPTOR_MCP_ALLOW` operator allowlist using the tier table
-copied from `cli/mcp/tiers.ts`. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
+`python/interceptor_mcp/` is a stdlib-only Python port of `interceptor_read`, `interceptor_local` (`local` minus `upgrade`),
+`interceptor_browser`, `interceptor_macos`, and `interceptor_ios`, plus the `interceptor://manifest` resource.
+Like the reference it is a thin subprocess wrapper over the `interceptor` CLI (`--json` and all other args pass through verbatim),
+fences captured content, injects the `INTERCEPTOR_MCP_GROUP` tab group on browser calls, and gates on the
+`INTERCEPTOR_MCP_ALLOW` operator allowlist using the tier table copied from `cli/mcp/tiers.ts`.
+Destructive and exec verbs are refused by default and never reach the CLI.
+Not ported yet: `interceptor_raw`, the help/extensions resources, and skills wiring.
+The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
+`python3 -m interceptor_mcp` warms the daemon via `interceptor contexts` unless `--no-warm` is set.
 
 ```bash
 # run the server (newline-delimited JSON-RPC on stdio; no dependencies beyond Python 3.9+)
@@ -1323,7 +1327,8 @@ claude mcp add interceptor -- env PYTHONPATH=$PWD/python python3 -m interceptor_
 
 The conformance suite runs the same cases against the TypeScript reference and the Python port, with the CLI replaced by
 `test/mcp-conformance/fake_interceptor.py`. It covers tree/text/find/screenshot/status/manifest/diagnose, flag and group
-injection, fencing, plus refusal proofs for unknown verbs, tier-gate bypass, and path-traversal verbs / resource URIs
+injection, fencing, browser/macOS/iOS mutate verbs (click/type/keys/scroll/navigate/tab/app activate), plus refusal proofs
+for unknown verbs, destructive/exec verbs on the default allowlist, tier-gate bypass, and path-traversal verbs / resource URIs
 (a refused call must never reach the CLI).
 
 ```bash
