@@ -8,7 +8,7 @@ with content-bearing output fenced (output.py). Speaks newline-delimited JSON-RP
 interceptor_browser, interceptor_macos, and interceptor_ios use the reference verb
 enums and the tier gate. interceptor_raw is registered and off unless the operator
 allowlist includes `raw` (or `ext`). `all` does not enable it. When raw is on, the
-argv is still classified and gated — confirm is the second key, never a substitute
+argv must start with the verb (a leading flag is refused), and it is classified and gated — confirm is the second key, never a substitute
 for the allowlist.
 
 Still absent: `local upgrade`, and the help/extensions resources.
@@ -317,12 +317,15 @@ def _tool_local(session: Session, a: dict) -> dict:
 
 
 _RAW_OFF = "interceptor_raw is disabled. Operator must relaunch with INTERCEPTOR_MCP_ALLOW=raw."
+_RAW_LEADING_FLAG = "interceptor_raw argv must start with the verb (or macos/ios), not a flag. Put the verb first and flags after it."
 
 
 def _tool_raw(session: Session, a: dict) -> dict:
     if not tiers.parse_allow(session.allow_env).raw:
         return _text_error(_RAW_OFF)
     args = a["args"]
+    if args[0].startswith("-"):
+        return _text_error(_RAW_LEADING_FLAG)
     surface, verb, rest = split_raw_argv(args)
     return _run_verb(
         session, surface, verb, rest,

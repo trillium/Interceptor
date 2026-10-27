@@ -362,6 +362,18 @@ class Conformance:
         finally:
             c.close()
 
+    def test_raw_refuses_leading_flag(self):
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw"})
+        try:
+            for argv in (["--json", "macos", "vm", "delete"], ["--tab", "1", "eval", "x"]):
+                for confirm in (None, True):
+                    res = c.call("interceptor_raw", args=argv, confirm=confirm) if confirm else c.call("interceptor_raw", args=argv)
+                    self.assertTrue(res.get("isError"), res)
+                    self.assertIn("must start with the verb", text_of(res))
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+
     def test_every_high_tier_verb_refused_without_its_allow(self):
         probes = gate_cases.high_tier_probes()
         self.assertGreater(len(probes), 40)

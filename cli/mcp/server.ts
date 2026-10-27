@@ -224,6 +224,7 @@ export function buildServer(): McpServer {
     return toResult({ surface: "local", verb: a.verb, run, fenceEnabled: session.fence })
   })
 
+  const RAW_LEADING_FLAG = "interceptor_raw argv must start with the verb (or macos/ios), not a flag. Put the verb first and flags after it."
   // ── interceptor_raw (escape hatch — off unless operator allows `raw`) ────────
   server.registerTool("interceptor_raw", {
     title: "Interceptor — raw passthrough",
@@ -239,8 +240,10 @@ export function buildServer(): McpServer {
     if (!allow.raw) {
       return { content: [{ type: "text", text: "interceptor_raw is disabled. Operator must relaunch with INTERCEPTOR_MCP_ALLOW=raw." }], isError: true }
     }
-    // Derive surface/verb for classification.
     const args = a.args
+    if (args[0].startsWith("-")) {
+      return { content: [{ type: "text", text: RAW_LEADING_FLAG }], isError: true }
+    }
     let surface: Surface = "browser", verb = args[0] || "", rest = args.slice(1)
     if (args[0] === "macos") { surface = "macos"; verb = args[1] || ""; rest = args.slice(2) }
     else if (args[0] === "ios") { surface = "ios"; verb = args[1] || ""; rest = args.slice(2) }

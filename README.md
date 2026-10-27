@@ -1316,7 +1316,7 @@ fences captured content, injects the `INTERCEPTOR_MCP_GROUP` tab group on browse
 Read and mutate run by default. Destructive and exec stay refused until the operator allowlists the tier
 (`destructive`, `arbitrary-exec` or `exec`), a `surface:verb`, or `all`, **and** the call passes `confirm: true`.
 Either key alone refuses, and nothing reaches the CLI. `interceptor_raw` is registered but disabled unless the allowlist
-includes `raw` or `ext`. `all` does not turn it on. When raw is on, the underlying argv is still classified and gated.
+includes `raw` or `ext`. `all` does not turn it on. When raw is on, argv must start with the verb (a leading `-` flag is refused), and the verb is classified and gated.
 An unknown sub-verb of a mixed family (`macos vm frobnicate`) takes that family's highest tier and is refused.
 
 Not ported yet: the help/extensions resources and skills wiring. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
