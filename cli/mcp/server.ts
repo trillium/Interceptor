@@ -14,7 +14,8 @@ import { COMMAND_SPECS } from "../manifest"
 import { VERSION } from "../version"
 import { runInterceptor, warmDaemon, withGlobalFlags } from "./adapter"
 import { toResult, type McpResult } from "./output"
-import { classify, gate, parseAllow, READ_VERBS, type Surface } from "./tiers"
+import { classify, gate, parseAllow, READ_VERBS, type Surface, type Tier } from "./tiers"
+import { floorTier, refuseUnadopt, skillsCliArgs, skillsNeedsGate, skillsSub, SKILLS_DESCRIPTION, SKILLS_OPS } from "./skills"
 
 const CALL_TIMEOUT_MS = 660_000 // backstop above the CLI's own 600s ios_setup ceiling
 
@@ -78,6 +79,15 @@ const IOS_VERBS: { v: string; s: string }[] = [
   { v: "web", s: "WebKit inspection (eval/call are exec)" },
 ]
 
+export function mcpMenuVerbs(): Record<string, string[]> {
+  return {
+    browser: BROWSER_VERBS.map(i => i.v),
+    macos: MACOS_VERBS.map(i => i.v),
+    ios: IOS_VERBS.map(i => i.v),
+    local: LOCAL_VERBS.map(i => i.v),
+  }
+}
+
 function foldMenu(items: { v: string; s: string }[]): string {
   return items.map(i => `${i.v} — ${i.s}`).join("; ")
 }
@@ -94,13 +104,20 @@ const READ_VERB_NAMES = [...new Set(READ_MENU.map(r => r.v))] as [string, ...str
 // ── Session state ─────────────────────────────────────────────────────────────
 type Session = { group: string; allowEnv: string | undefined; fence: boolean }
 
+function callTimeoutMs(): number {
+  const n = Number(process.env.INTERCEPTOR_MCP_CALL_TIMEOUT_MS)
+  return Number.isFinite(n) && n > 0 ? n : CALL_TIMEOUT_MS
+}
+
 async function runVerb(
   surface: Surface, verb: string, args: string[],
   session: Session,
   flags: { group?: string; context?: string; tab?: number; device?: string; session?: string; confirm?: boolean },
   cliArgs: string[],
+  floor?: Tier,
 ): Promise<McpResult> {
-  const c = classify(surface, verb, args)
+  const classified = classify(surface, verb, args)
+  const c = floor ? { ...classified, tier: floorTier(classified.tier, floor) } : classified
   const g = gate(c, parseAllow(session.allowEnv), flags.confirm === true)
   if (!g.allowed) {
     return { content: [{ type: "text", text: g.reason || "refused" }], isError: true }
@@ -112,7 +129,7 @@ async function runVerb(
     device: surface === "ios" ? flags.device : undefined,
     session: surface === "ios" ? flags.session : undefined,
   })
-  const run = await runInterceptor(injected, { timeoutMs: CALL_TIMEOUT_MS })
+  const run = await runInterceptor(injected, { timeoutMs: callTimeoutMs() })
   return toResult({ surface, verb, run, fenceEnabled: session.fence })
 }
 
@@ -220,8 +237,41 @@ export function buildServer(): McpServer {
     const args = a.args || []
     // upgrade is the one mutating local verb — gate it under the tier system.
     if (a.verb === "upgrade") return runVerb("local", a.verb, args, session, { confirm: false }, [a.verb, ...args])
-    const run = await runInterceptor([a.verb, ...args], { timeoutMs: CALL_TIMEOUT_MS })
+    // skills adopt/unadopt must not bypass the gate via the local passthrough.
+    if (a.verb === "skills" && skillsNeedsGate(args)) {
+      const refusal = skillsSub(args) === "unadopt" ? refuseUnadopt(undefined, undefined, args) : null
+      if (refusal) return { content: [{ type: "text", text: refusal }], isError: true }
+      return runVerb("local", a.verb, args, session, { confirm: false }, [a.verb, ...args], "mutate")
+    }
+    const run = await runInterceptor([a.verb, ...args], { timeoutMs: callTimeoutMs() })
     return toResult({ surface: "local", verb: a.verb, run, fenceEnabled: session.fence })
+  })
+
+  server.registerTool("interceptor_skills", {
+    title: "Interceptor — skills",
+    description: SKILLS_DESCRIPTION,
+    inputSchema: {
+      op: z.enum(SKILLS_OPS).describe("list, status, show, adopt, or unadopt"),
+      name: z.string().optional().describe("skill name for show, adopt, or unadopt"),
+      args: z.array(z.string()).optional().describe("extra CLI arguments, verbatim (adopt: --into, --all, --force)"),
+      path: z.string().optional().describe("unadopt path to unlink; refused when it is outside the skills root"),
+      confirm: z.boolean().optional().describe("passed to the gate; not required at mutate"),
+    },
+  }, async (a: { op: string; name?: string; args?: string[]; path?: string; confirm?: boolean }) => {
+    const args = a.args || []
+    if (a.op === "unadopt") {
+      const refusal = refuseUnadopt(a.name, a.path, args)
+      if (refusal) return { content: [{ type: "text", text: refusal }], isError: true }
+      if (!a.name && !a.path && !args.some(x => !x.startsWith("-"))) {
+        return { content: [{ type: "text", text: "unadopt requires a skill name or a path inside the skills root" }], isError: true }
+      }
+    }
+    const cli = skillsCliArgs(a.op, a.name, args, a.path)
+    if (a.op === "adopt" || a.op === "unadopt") {
+      return runVerb("local", "skills", cli.slice(1), session, { confirm: a.confirm }, cli, "mutate")
+    }
+    const run = await runInterceptor(cli, { timeoutMs: callTimeoutMs() })
+    return toResult({ surface: "local", verb: "skills", run, fenceEnabled: session.fence })
   })
 
   const RAW_LEADING_FLAG = "interceptor_raw argv must start with the verb (or macos/ios), not a flag. Put the verb first and flags after it."

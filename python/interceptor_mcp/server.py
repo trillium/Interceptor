@@ -11,7 +11,10 @@ allowlist includes `raw` (or `ext`). `all` does not enable it. When raw is on, t
 argv must start with the verb (a leading flag is refused), and it is classified and gated — confirm is the second key, never a substitute
 for the allowlist.
 
-Still absent: `local upgrade`, and the help/extensions resources.
+Still absent: `local upgrade` (the reference offers it; this port does not).
+Discovery resources (help/macos, help/ios, extensions, help/{verb}) and the
+skills tool match the reference. adopt/unadopt go through the gate at mutate
+minimum; unadopt of a path outside the skills root never reaches the CLI.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import threading
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
-from . import adapter, output, tiers
+from . import adapter, output, skills, tiers
 from .menus import BROWSER_VERBS, IOS_VERBS, MACOS_VERBS
 
 CALL_TIMEOUT_MS = 660_000
@@ -199,6 +202,18 @@ TOOLS: list[dict] = [
             "confirm": {"type": "boolean"},
         }, ["args"], forbid_extra=False),
     },
+    {
+        "name": "interceptor_skills",
+        "title": "Interceptor — skills",
+        "description": skills.SKILLS_DESCRIPTION,
+        "inputSchema": _schema({
+            "op": _str("list, status, show, adopt, or unadopt", skills.SKILLS_OPS),
+            "name": _str("skill name for show, adopt, or unadopt"),
+            "args": _args("extra CLI arguments, verbatim (adopt: --into, --all, --force)"),
+            "path": _str("unadopt path to unlink; refused when it is outside the skills root"),
+            "confirm": _bool("passed to the gate; not required at mutate"),
+        }, ["op"], forbid_extra=False),
+    },
 ]
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
@@ -206,6 +221,30 @@ MANIFEST_RESOURCE = {
     "uri": "interceptor://manifest", "name": "manifest", "mimeType": "application/json",
     "description": "Machine-readable capability manifest (browser+local fully; macos/ios stubs)",
 }
+HELP_MACOS_RESOURCE = {
+    "uri": "interceptor://help/macos", "name": "help-macos", "mimeType": "text/plain",
+    "description": "Full macOS verb + sub-verb reference",
+}
+HELP_IOS_RESOURCE = {
+    "uri": "interceptor://help/ios", "name": "help-ios", "mimeType": "text/plain",
+    "description": "Full iOS verb + sub-verb reference",
+}
+EXTENSIONS_RESOURCE = {
+    "uri": "interceptor://extensions", "name": "extensions", "mimeType": "application/json",
+    "description": "Installed extension verbs (not in the manifest)",
+}
+RESOURCES = [MANIFEST_RESOURCE, HELP_MACOS_RESOURCE, HELP_IOS_RESOURCE, EXTENSIONS_RESOURCE]
+HELP_TEMPLATE = {
+    "name": "help", "uriTemplate": "interceptor://help/{verb}", "mimeType": "text/plain",
+    "description": "Help for one verb",
+}
+_RESOURCE_ARGV = {
+    "interceptor://manifest": ["manifest"],
+    "interceptor://help/macos": ["help", "macos"],
+    "interceptor://help/ios": ["help", "ios"],
+    "interceptor://extensions": ["extensions", "list", "--json"],
+}
+_HELP_VERB_RE = re.compile(r"^[^/,]+$")
 
 
 def _validate(tool: dict, args: Any) -> Optional[str]:
@@ -253,8 +292,23 @@ def _text_error(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
-def _run_verb(session: Session, surface: str, verb: str, args: list[str], flags: dict, cli_args: list[str]) -> dict:
+def call_timeout_ms() -> int:
+    raw = os.environ.get("INTERCEPTOR_MCP_CALL_TIMEOUT_MS")
+    if raw:
+        try:
+            n = int(raw)
+        except ValueError:
+            n = 0
+        if n > 0:
+            return n
+    return CALL_TIMEOUT_MS
+
+
+def _run_verb(session: Session, surface: str, verb: str, args: list[str], flags: dict, cli_args: list[str],
+              floor: Optional[str] = None) -> dict:
     c = tiers.classify(surface, verb, args)
+    if floor:
+        c = c._replace(tier=skills.floor_tier(c.tier, floor))
     g = tiers.gate(c, tiers.parse_allow(session.allow_env), flags.get("confirm") is True)
     if not g.allowed:
         return _text_error(g.reason or "refused")
@@ -267,7 +321,7 @@ def _run_verb(session: Session, surface: str, verb: str, args: list[str], flags:
         device=flags.get("device") if ios else None,
         session=flags.get("session") if ios else None,
     )
-    run = adapter.run_interceptor(injected, CALL_TIMEOUT_MS)
+    run = adapter.run_interceptor(injected, call_timeout_ms())
     return output.to_result(surface, verb, run.stdout, run.stderr, run.code, session.fence)
 
 
@@ -312,8 +366,30 @@ def session_flags(session: Session, a: dict) -> dict:
 
 def _tool_local(session: Session, a: dict) -> dict:
     verb, args = a["verb"], a.get("args") or []
-    run = adapter.run_interceptor([verb, *args], CALL_TIMEOUT_MS)
+    if verb == "skills" and skills.skills_needs_gate(args):
+        if skills.skills_sub(args) == "unadopt":
+            refusal = skills.refuse_unadopt(None, None, args)
+            if refusal:
+                return _text_error(refusal)
+        return _run_verb(session, "local", verb, args, {"confirm": False}, [verb, *args], "mutate")
+    run = adapter.run_interceptor([verb, *args], call_timeout_ms())
     return output.to_result("local", verb, run.stdout, run.stderr, run.code, session.fence)
+
+
+def _tool_skills(session: Session, a: dict) -> dict:
+    op, args = a["op"], a.get("args") or []
+    name, path = a.get("name"), a.get("path")
+    if op == "unadopt":
+        refusal = skills.refuse_unadopt(name, path, args)
+        if refusal:
+            return _text_error(refusal)
+        if not name and not path and not any(not x.startswith("-") for x in args):
+            return _text_error("unadopt requires a skill name or a path inside the skills root")
+    cli = skills.skills_cli_args(op, name, args, path)
+    if op in ("adopt", "unadopt"):
+        return _run_verb(session, "local", "skills", cli[1:], {"confirm": a.get("confirm")}, cli, "mutate")
+    run = adapter.run_interceptor(cli, call_timeout_ms())
+    return output.to_result("local", "skills", run.stdout, run.stderr, run.code, session.fence)
 
 
 _RAW_OFF = "interceptor_raw is disabled. Operator must relaunch with INTERCEPTOR_MCP_ALLOW=raw."
@@ -341,6 +417,7 @@ _HANDLERS: dict[str, Callable[[Session, dict], dict]] = {
     "interceptor_read": _tool_read,
     "interceptor_local": _tool_local,
     "interceptor_raw": _tool_raw,
+    "interceptor_skills": _tool_skills,
 }
 
 
@@ -383,11 +460,17 @@ def normalize_uri(uri: str) -> str:
 
 
 def _read_resource(session: Session, uri: str) -> Optional[dict]:
-    if normalize_uri(uri) != MANIFEST_RESOURCE["uri"]:
-        return None
-    run = adapter.run_interceptor(["manifest"], RESOURCE_TIMEOUT_MS)
-    return {"contents": [{"uri": MANIFEST_RESOURCE["uri"], "mimeType": "application/json",
-                          "text": run.stdout or run.stderr}]}
+    canon = normalize_uri(uri)
+    argv = _RESOURCE_ARGV.get(canon)
+    if argv is not None:
+        spec = next(r for r in RESOURCES if r["uri"] == canon)
+        run = adapter.run_interceptor(argv, RESOURCE_TIMEOUT_MS)
+        return {"contents": [{"uri": canon, "mimeType": spec["mimeType"], "text": run.stdout or run.stderr}]}
+    m = re.fullmatch(r"interceptor://help/([^/,]+)", canon)
+    if m and _HELP_VERB_RE.match(m.group(1)) and m.group(1) not in (".", ".."):
+        run = adapter.run_interceptor(["help", m.group(1)], RESOURCE_TIMEOUT_MS)
+        return {"contents": [{"uri": canon, "mimeType": "text/plain", "text": run.stdout or run.stderr}]}
+    return None
 
 
 # ── JSON-RPC dispatch ────────────────────────────────────────────────────────
@@ -422,9 +505,9 @@ def handle(session: Session, method: str, params: Any) -> Any:
             return _text_error(f"MCP error -32602: Input validation error: Invalid arguments for tool {name}: {err}")
         return _HANDLERS[name](session, args)
     if method == "resources/list":
-        return {"resources": [MANIFEST_RESOURCE]}
+        return {"resources": RESOURCES}
     if method == "resources/templates/list":
-        return {"resourceTemplates": []}
+        return {"resourceTemplates": [HELP_TEMPLATE]}
     if method == "resources/read":
         uri = params.get("uri")
         res = _read_resource(session, uri) if isinstance(uri, str) else None

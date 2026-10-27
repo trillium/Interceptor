@@ -34,12 +34,31 @@ export async function runInterceptor(args: string[], opts: { timeoutMs?: number 
     return { stdout: "", stderr: `failed to spawn interceptor: ${(err as Error).message}`, code: 127 }
   }
 
+  const timeoutMs = opts.timeoutMs
   let timer: ReturnType<typeof setTimeout> | undefined
   let timedOut = false
-  if (opts.timeoutMs && opts.timeoutMs > 0) {
-    timer = setTimeout(() => { timedOut = true; try { proc.kill() } catch {} }, opts.timeoutMs)
-  }
-  try {
+  // Kill must not wait on the pipes. Bun's stdout read can stay open after
+  // SIGKILL, which would hang the tool call past the timeout.
+  const killed = new Promise<RunResult>((resolve) => {
+    if (!timeoutMs || timeoutMs <= 0) return
+    timer = setTimeout(() => {
+      timedOut = true
+      // SIGTERM, not SIGKILL: the conformance harness re-invokes through bun,
+      // which must be able to forward the signal to the CLI child. A direct
+      // interceptor binary dies on SIGTERM the same way.
+      try { proc.kill("SIGTERM") } catch { try { proc.kill() } catch {} }
+      const killedResult: RunResult = {
+        stdout: "",
+        stderr: `\n[interceptor-mcp] killed after ${timeoutMs}ms`,
+        code: 124,
+      }
+      // Wait out the kill so the caller can observe the process is gone, but
+      // never block on the pipes — that read is what used to hang past the timeout.
+      const giveUp = setTimeout(() => resolve(killedResult), 500)
+      proc.exited.then(() => { clearTimeout(giveUp); resolve(killedResult) }, () => resolve(killedResult))
+    }, timeoutMs)
+  })
+  const finished = (async (): Promise<RunResult> => {
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout as ReadableStream).text(),
       new Response(proc.stderr as ReadableStream).text(),
@@ -47,9 +66,12 @@ export async function runInterceptor(args: string[], opts: { timeoutMs?: number 
     const code = await proc.exited
     if (timer) clearTimeout(timer)
     if (timedOut) {
-      return { stdout, stderr: stderr + `\n[interceptor-mcp] killed after ${opts.timeoutMs}ms`, code: 124 }
+      return { stdout, stderr: stderr + `\n[interceptor-mcp] killed after ${timeoutMs}ms`, code: 124 }
     }
     return { stdout, stderr, code }
+  })()
+  try {
+    return await Promise.race([finished, killed])
   } catch (err) {
     if (timer) clearTimeout(timer)
     return { stdout: "", stderr: `interceptor run error: ${(err as Error).message}`, code: 1 }

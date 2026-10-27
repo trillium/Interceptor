@@ -121,6 +121,48 @@ FAMILY_MUTATE_SUBS: dict[str, set[str]] = {
 }
 
 
+# Keep in lockstep with cli/mcp/tiers.ts EXPLICIT.
+EXPLICIT = {
+    "browser:back": "mutate",
+    "browser:batch": "mutate",
+    "browser:blur": "mutate",
+    "browser:brand": "mutate",
+    "browser:capture": "mutate",
+    "browser:check": "mutate",
+    "browser:clear": "mutate",
+    "browser:clipboard": "mutate",
+    "browser:dblclick": "mutate",
+    "browser:focus": "mutate",
+    "browser:forward": "mutate",
+    "browser:group": "mutate",
+    "browser:notify": "mutate",
+    "browser:regions": "mutate",
+    "browser:reload": "mutate",
+    "browser:rightclick": "mutate",
+    "browser:session": "mutate",
+    "browser:sse": "mutate",
+    "browser:wait_for": "mutate",
+    "browser:window": "mutate",
+    "ios:tunnel": "mutate",
+    "local:daemon": "mutate",
+    "local:help": "read",
+    "local:upgrade": "mutate",
+}
+
+
+def classification_keys() -> list[str]:
+    keys = set()
+    for surface, verbs in READ_VERBS.items():
+        for verb in verbs:
+            keys.add(f"{surface}:{verb}")
+    for table in (EXEC, DESTRUCTIVE_SUB, FAMILY_FLOOR, EXPLICIT):
+        for key in table:
+            surface, verb, *_ = key.split(":")
+            if surface and verb:
+                keys.add(f"{surface}:{verb}")
+    return sorted(keys)
+
+
 def sub_verb_of(args: list[str]) -> str:
     """First non-flag token after the verb (the sub-verb), else ''."""
     for a in args:
@@ -175,7 +217,10 @@ def classify(surface: str, verb: str, args: list[str]) -> Classification:
         return mk(FAMILY_FLOOR[key2])
     if key2 in FAMILY_FLOOR and not sub:
         return mk("read")
-    # 5. default
+    # 5. explicitly classified verbs (drift check fails if a new CLI verb is missing).
+    if key2 in EXPLICIT:
+        return mk(EXPLICIT[key2])
+    # 6. default
     return mk("mutate")
 
 

@@ -417,6 +417,8 @@ Meta:
   interceptor skills show <name>             One skill's purpose + which text verb returns what
   interceptor skills adopt [names…] [--into claude,codex,agents] [--all] [--force]
                                              Symlink skill packs into AI runtimes (junctions on Windows)
+  interceptor skills unadopt [names…] [--path <path>]
+                                             Remove a skill link. Refuses any path outside the skills root
 
 Branding:
   interceptor brand tab-group --title <label> [--color <color>]

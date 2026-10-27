@@ -6,7 +6,7 @@ Surface prefixes (`macos`, `ios`) are stripped before dispatch. Test hooks:
   --fake-fail            exit 3 with stderr "boom"
   --fake-success-false   exit 0 with {"success": false, "error": "nope"}
 """
-import base64, json, os, sys
+import base64, json, os, sys, time
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
@@ -20,6 +20,16 @@ if log:
 rest = argv[1:] if argv and argv[0] in ("macos", "ios") else argv
 verb = rest[0] if rest else ""
 as_json = "--json" in argv
+
+if "--fake-sleep" in argv:
+    pid_path = os.environ.get("FAKE_PID")
+    if pid_path:
+        with open(pid_path, "w") as f:
+            f.write(str(os.getpid()))
+            f.flush()
+    time.sleep(float(os.environ.get("FAKE_SLEEP") or "30"))
+    print("slept")
+    sys.exit(0)
 
 if "--fake-fail" in argv:
     sys.stderr.write("boom\n"); sys.exit(3)
@@ -58,6 +68,13 @@ elif verb == "manifest":
     print(json.dumps({"version": "fake", "commands": [{"name": "tree", "surface": "browser"}]}))
 elif verb == "diagnose":
     print("diagnose: ok\ncontexts: 1")
+elif verb == "help":
+    topic = rest[1] if len(rest) > 1 else ""
+    print("help:" + topic)
+elif verb == "skills":
+    print("skills:" + " ".join(rest[1:]))
+elif verb == "extensions" and "list" in rest:
+    print(json.dumps({"root": "/ext", "extensions": [{"name": "demo"}], "rejected": []}))
 elif verb in ("tabs", "contexts", "extensions", "capabilities", "profiles"):
     print("ok:" + verb)
 else:

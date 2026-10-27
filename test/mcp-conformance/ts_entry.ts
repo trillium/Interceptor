@@ -18,5 +18,11 @@ if (args[0] === "__serve") {
   const bin = process.env.INTERCEPTOR_BIN
   if (!bin) { console.error("INTERCEPTOR_BIN not set"); process.exit(127) }
   const proc = Bun.spawn([bin, ...args], { stdout: "inherit", stderr: "inherit", stdin: "ignore" })
+  const stop = () => {
+    try { proc.kill("SIGKILL") } catch {}
+    process.exit(124)
+  }
+  process.on("SIGTERM", stop)
+  process.on("SIGINT", stop)
   process.exit(await proc.exited)
 }

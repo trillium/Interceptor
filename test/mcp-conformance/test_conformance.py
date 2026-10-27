@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from typing import Any, Optional
 
@@ -582,6 +583,160 @@ class Conformance:
             self.assertEqual(r["error"]["code"], -32602)
         self.assertEqual(self.client.calls(), [])
 
+    # ── discovery resources ──────────────────────────────────────────────────
+    def test_discovery_resources_listed_without_a_cli_call(self):
+        listed = self.client.rpc("resources/list")["result"]["resources"]
+        self.assertEqual([r["uri"] for r in listed], [
+            "interceptor://manifest", "interceptor://help/macos", "interceptor://help/ios", "interceptor://extensions",
+        ])
+        self.assertEqual(listed[1]["description"], "Full macOS verb + sub-verb reference")
+        self.assertEqual(listed[3]["mimeType"], "application/json")
+        templates = self.client.rpc("resources/templates/list")["result"]["resourceTemplates"]
+        self.assertEqual(templates, [{
+            "name": "help", "uriTemplate": "interceptor://help/{verb}",
+            "mimeType": "text/plain", "description": "Help for one verb",
+        }])
+        self.assertEqual(self.client.calls(), [])
+
+    def test_help_and_extensions_resources_shell_out(self):
+        macos = self.client.rpc("resources/read", {"uri": "interceptor://help/macos"})["result"]["contents"][0]
+        self.assertEqual(macos["mimeType"], "text/plain")
+        self.assertIn("help:macos", macos["text"])
+        ios = self.client.rpc("resources/read", {"uri": "interceptor://help/ios"})["result"]["contents"][0]
+        self.assertIn("help:ios", ios["text"])
+        ext = self.client.rpc("resources/read", {"uri": "interceptor://extensions"})["result"]["contents"][0]
+        self.assertEqual(ext["mimeType"], "application/json")
+        self.assertEqual(json.loads(ext["text"])["extensions"][0]["name"], "demo")
+        opened = self.client.rpc("resources/read", {"uri": "interceptor://help/open"})["result"]["contents"][0]
+        self.assertIn("help:open", opened["text"])
+        self.assertEqual(opened["uri"], "interceptor://help/open")
+        self.assertEqual(self.client.calls(), [
+            ["help", "macos"], ["help", "ios"], ["extensions", "list", "--json"], ["help", "open"],
+        ])
+
+    def test_help_template_rejects_extra_segments(self):
+        r = self.client.rpc("resources/read", {"uri": "interceptor://help/open/flags"})
+        self.assertEqual(r["error"]["code"], -32602)
+        self.assertEqual(self.client.calls(), [])
+
+    # ── skills ───────────────────────────────────────────────────────────────
+    def test_skills_tool_is_listed(self):
+        tools = {t["name"]: t for t in self.client.rpc("tools/list")["result"]["tools"]}
+        tool = tools["interceptor_skills"]
+        self.assertEqual(tool["title"], "Interceptor — skills")
+        self.assertNotIn("readOnlyHint", (tool.get("annotations") or {}))
+        self.assertEqual(tool["inputSchema"]["properties"]["op"]["enum"],
+                         ["list", "status", "show", "adopt", "unadopt"])
+        self.assertEqual(tool["inputSchema"]["required"], ["op"])
+
+    def test_skills_list_status_show_reach_cli_unfenced(self):
+        self.assertEqual(text_of(self.client.call("interceptor_skills", op="list")), "skills:list")
+        self.assertNotIn("UNTRUSTED", text_of(self.client.call("interceptor_skills", op="status", args=["--json"])))
+        self.client.call("interceptor_skills", op="show", name="interceptor-browser")
+        self.assertEqual(self.client.calls(), [
+            ["skills", "list"],
+            ["skills", "status", "--json"],
+            ["skills", "show", "interceptor-browser"],
+        ])
+
+    def test_skills_adopt_reaches_cli_without_confirm_or_group(self):
+        res = self.client.call("interceptor_skills", op="adopt", name="interceptor-browser", args=["--into", "claude"])
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self.client.calls(), [["skills", "adopt", "interceptor-browser", "--into", "claude"]])
+        self.assertNotIn("--group", self.client.calls()[0])
+
+    def test_local_skills_adopt_is_gated_and_reaches_cli(self):
+        res = self.client.call("interceptor_local", verb="skills", args=["adopt", "interceptor-browser"])
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self.client.calls(), [["skills", "adopt", "interceptor-browser"]])
+
+    def test_unadopt_safe_name_reaches_cli(self):
+        res = self.client.call("interceptor_skills", op="unadopt", name="interceptor-browser")
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self.client.calls(), [["skills", "unadopt", "interceptor-browser"]])
+
+    def test_unadopt_refuses_foreign_paths(self):
+        cases = [
+            {"path": "/etc/passwd"},
+            {"name": "../.ssh"},
+            {"args": ["--path", "/etc/passwd"]},
+            {"name": "ok", "path": "/tmp/not-the-skills-root/x"},
+        ]
+        for kwargs in cases:
+            self.client.reset()
+            res = self.client.call("interceptor_skills", op="unadopt", **kwargs)
+            self.assertRefused(res, "unadopt refuses paths outside the skills root")
+
+    def test_unadopt_inside_root_reaches_cli_sibling_prefix_does_not(self):
+        root = self.client.tmp
+        inside = os.path.join(root, "linked-skill")
+        c = Client(self.impl, {"INTERCEPTOR_SKILLS_ROOT": root})
+        try:
+            res = c.call("interceptor_skills", op="unadopt", path=inside)
+            self.assertFalse(res.get("isError"), res)
+            self.assertEqual(c.calls(), [["skills", "unadopt", "--path", inside]])
+            sibling = root + "-evil"
+            os.makedirs(sibling, exist_ok=True)
+            res = c.call("interceptor_skills", op="unadopt", path=os.path.join(sibling, "x"))
+            self.assertTrue(res.get("isError"), res)
+            self.assertIn("outside the skills root", text_of(res))
+            self.assertEqual(len(c.calls()), 1, "a foreign path must not reach the CLI")
+        finally:
+            c.close()
+            shutil.rmtree(root + "-evil", ignore_errors=True)
+
+    def test_local_unadopt_refuses_foreign_path(self):
+        res = self.client.call("interceptor_local", verb="skills", args=["unadopt", "--path", "/etc/passwd"])
+        self.assertRefused(res, "unadopt refuses paths outside the skills root")
+
+    def test_unadopt_without_target_and_unknown_op_refused(self):
+        self.assertRefused(self.client.call("interceptor_skills", op="unadopt"), "unadopt requires a skill name")
+        self.assertRefused(self.client.call("interceptor_skills", op="rm-rf"), "Input validation")
+        self.assertEqual(self.client.calls(), [])
+
+    # ── fence + timeout-kill ─────────────────────────────────────────────────
+    def test_fence_wraps_macos_tree_and_not_status(self):
+        t = text_of(self.client.call("interceptor_read", surface="macos", verb="tree"))
+        self.assertTrue(t.startswith(FENCE_OPEN + "tree "), t)
+        self.assertTrue(t.rstrip().endswith("⟦/UNTRUSTED⟧"))
+        self.assertNotIn("UNTRUSTED", text_of(self.client.call("interceptor_local", verb="status")))
+
+    def test_fence_off_is_case_insensitive(self):
+        c = Client(self.impl, {"INTERCEPTOR_MCP_FENCE": "OFF"})
+        try:
+            self.assertEqual(text_of(c.call("interceptor_read", surface="browser", verb="text")), "Hello <b>world</b>")
+        finally:
+            c.close()
+
+    def test_timeout_kills_the_cli_process(self):
+        pidfile = os.path.join(self.client.tmp, "sleep.pid")
+        c = Client(self.impl, {
+            "INTERCEPTOR_MCP_CALL_TIMEOUT_MS": "250",
+            "FAKE_SLEEP": "30",
+            "FAKE_PID": pidfile,
+        })
+        try:
+            res = c.rpc("tools/call", {"name": "interceptor_read", "arguments": {
+                "surface": "browser", "verb": "tree", "args": ["--fake-sleep"],
+            }}, timeout=8)["result"]
+            self.assertTrue(res.get("isError"), res)
+            self.assertIn("killed after 250ms", text_of(res))
+            self.assertNotIn("UNTRUSTED", text_of(res))
+            self.assertTrue(os.path.exists(pidfile), "the CLI must have started before the kill")
+            with open(pidfile) as f:
+                pid = int(f.read().strip())
+            alive = True
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    alive = False
+                    break
+                time.sleep(0.05)
+            self.assertFalse(alive, f"timed-out CLI pid {pid} is still alive")
+        finally:
+            c.close()
+
 
 def _make(impl: str) -> type:
     return type(f"Conformance_{impl}", (Conformance, unittest.TestCase), {"impl": impl})
@@ -600,11 +755,16 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001
         suite.addTest(CrossImpl("test_same_read_menu"))
         suite.addTest(CrossImpl("test_same_mutate_menus"))
         suite.addTest(CrossImpl("test_same_raw_tool"))
+        suite.addTest(CrossImpl("test_same_skills_tool"))
+        suite.addTest(CrossImpl("test_same_discovery_resources"))
     if "ts" in ENABLED:
         suite.addTest(TierParity("test_python_matches_reference"))
     if "py" in ENABLED:
         suite.addTest(PythonOnly("test_local_upgrade_not_offered"))
-        suite.addTest(PythonOnly("test_help_resources_not_offered"))
+    suite.addTest(Drift("test_classification_keys_match"))
+    suite.addTest(Drift("test_cli_verbs_are_classified"))
+    suite.addTest(Drift("test_new_verb_fails_loudly"))
+    suite.addTest(SuiteSize("test_at_least_60_checks"))
     return suite
 
 
@@ -730,8 +890,65 @@ class CrossImpl(unittest.TestCase):
         self.assertEqual(ts.get("annotations"), py.get("annotations"))
 
 
+    def test_same_skills_tool(self):
+        tools = self._tools()
+        ts, py = tools["ts"]["interceptor_skills"], tools["py"]["interceptor_skills"]
+        self.assertEqual(ts["title"], py["title"])
+        self.assertEqual(ts["description"], py["description"])
+        self.assertEqual(ts["inputSchema"], py["inputSchema"])
+        self.assertEqual(ts.get("annotations"), py.get("annotations"))
+
+    def test_same_discovery_resources(self):
+        got = {}
+        for impl in ENABLED:
+            c = Client(impl)
+            try:
+                got[impl] = {
+                    "resources": c.rpc("resources/list")["result"]["resources"],
+                    "templates": c.rpc("resources/templates/list")["result"]["resourceTemplates"],
+                }
+                self.assertEqual(c.calls(), [])
+            finally:
+                c.close()
+        self.assertEqual(got["ts"], got["py"])
+
+
+class Drift(unittest.TestCase):
+    def test_classification_keys_match(self):
+        import drift_check
+        if not shutil.which("bun"):
+            self.skipTest("bun required to read the TS classification")
+        self.assertEqual(drift_check.py_known_keys(), drift_check.ts_known_keys())
+
+    def test_cli_verbs_are_classified(self):
+        import drift_check
+        missing = drift_check.unknown_verbs()
+        self.assertEqual(missing, [], drift_check.explain(missing))
+
+    def test_new_verb_fails_loudly(self):
+        import drift_check
+        missing = drift_check.unknown_verbs(required={"browser:not-a-real-verb"}, known=set())
+        self.assertEqual(missing, ["browser:not-a-real-verb"])
+        loud = drift_check.explain(missing)
+        self.assertIn("DRIFT:", loud)
+        self.assertIn("browser:not-a-real-verb", loud)
+        self.assertIn("EXPLICIT", loud)
+        with self.assertRaises(SystemExit) as ctx:
+            drift_check.assert_no_drift(required={"browser:not-a-real-verb"}, known=set())
+        self.assertIn("DRIFT:", str(ctx.exception))
+
+
+class SuiteSize(unittest.TestCase):
+    def test_at_least_60_checks(self):
+        methods = [m for m in dir(Conformance) if m.startswith("test_")]
+        # Dual-impl runs each Conformance method twice, plus the referee cases.
+        dual = len(methods) * 2 + 8
+        self.assertGreaterEqual(len(methods), 40, f"only {len(methods)} conformance methods")
+        self.assertGreaterEqual(dual, 60, f"dual suite would be {dual}, need 60+")
+
+
 class PythonOnly(unittest.TestCase):
-    """Deliberate omissions versus the reference: local upgrade and discovery resources."""
+    """Deliberate omission versus the reference: local upgrade is not offered."""
 
     def test_local_upgrade_not_offered(self):
         c = Client("py")
@@ -742,15 +959,10 @@ class PythonOnly(unittest.TestCase):
         finally:
             c.close()
 
-    def test_help_resources_not_offered(self):
-        c = Client("py")
-        try:
-            uris = {r["uri"] for r in c.rpc("resources/list")["result"]["resources"]}
-            self.assertEqual(uris, {"interceptor://manifest"})
-            self.assertEqual(c.calls(), [])
-        finally:
-            c.close()
-
 
 if __name__ == "__main__":
+    suite = load_tests(unittest.defaultTestLoader, None, None)
+    count = suite.countTestCases()
+    if os.environ.get("MCP_IMPL", "ts,py") in ("ts,py", "both", "") and count < 60:
+        raise SystemExit(f"conformance suite has {count} checks, need 60+")
     unittest.main(verbosity=2)

@@ -169,7 +169,10 @@ export function classify(surface: Surface, verb: string, args: string[]): Classi
   if (FAMILY_FLOOR[key2] && sub) return mk(FAMILY_FLOOR[key2])
   if (FAMILY_FLOOR[key2] && !sub) return mk("read") // bare family verb = its listing/help
 
-  // 5. default.
+  // 5. explicitly classified verbs (drift check fails if a new CLI verb is missing).
+  if (EXPLICIT[key2]) return mk(EXPLICIT[key2])
+
+  // 6. default.
   return mk("mutate")
 
   function mk(tier: Tier): Classification { return { tier, surface, verb, sub } }
@@ -271,6 +274,55 @@ export function gate(c: Classification, allow: AllowSet, confirm: boolean): Gate
     }
   }
   return { allowed: true, needsConfirm: false }
+}
+
+/**
+ * Verbs the CLI already dispatches that are not on an MCP menu and not in
+ * READ_VERBS / EXEC / FAMILY_FLOOR. Naming them here is what "the classification
+ * knows this verb" means — a new CLI verb that is absent fails the drift check
+ * instead of silently defaulting to mutate.
+ *
+ * Tiers match today's default (mutate) except local help, which only prints.
+ * Do not raise a tier here without a conformance case: that changes what raw
+ * will run.
+ */
+export const EXPLICIT: TierMap = {
+  "browser:back": "mutate",
+  "browser:batch": "mutate",
+  "browser:blur": "mutate",
+  "browser:brand": "mutate",
+  "browser:capture": "mutate",
+  "browser:check": "mutate",
+  "browser:clear": "mutate",
+  "browser:clipboard": "mutate",
+  "browser:dblclick": "mutate",
+  "browser:focus": "mutate",
+  "browser:forward": "mutate",
+  "browser:group": "mutate",
+  "browser:notify": "mutate",
+  "browser:regions": "mutate",
+  "browser:reload": "mutate",
+  "browser:rightclick": "mutate",
+  "browser:session": "mutate",
+  "browser:sse": "mutate",
+  "browser:wait_for": "mutate",
+  "browser:window": "mutate",
+  "ios:tunnel": "mutate",
+  "local:daemon": "mutate",
+  "local:help": "read",
+  "local:upgrade": "mutate",
+}
+
+export function classificationKeys(): string[] {
+  const keys = new Set<string>()
+  for (const [surface, verbs] of Object.entries(READ_VERBS)) {
+    for (const v of verbs) keys.add(`${surface}:${v}`)
+  }
+  for (const k of [...Object.keys(EXEC), ...Object.keys(DESTRUCTIVE_SUB), ...Object.keys(FAMILY_FLOOR), ...Object.keys(EXPLICIT)]) {
+    const [surface, verb] = k.split(":")
+    if (surface && verb) keys.add(`${surface}:${verb}`)
+  }
+  return [...keys].sort()
 }
 
 export { TIER_RANK, READ_VERBS }

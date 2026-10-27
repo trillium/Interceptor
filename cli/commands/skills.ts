@@ -16,7 +16,7 @@ import {
   existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
   readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs"
-import { join, dirname, resolve } from "node:path"
+import { isAbsolute, join, dirname, relative, resolve } from "node:path"
 import { homedir, tmpdir } from "node:os"
 
 const PKG_SKILLS_DIR_DARWIN = "/Library/Application Support/Interceptor/skills"
@@ -105,6 +105,77 @@ export function allTargets(home = homedir(), env: Record<string, string | undefi
 
 export function detectedTargets(home = homedir(), env: Record<string, string | undefined> = process.env): SkillTarget[] {
   return allTargets(home, env).filter(t => existsSync(t.parent))
+}
+
+/** A skill name, not a path. Anything else is judged against the skills root. */
+export function isSafeSkillName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(name)
+}
+
+/**
+ * Roots unadopt may touch. `INTERCEPTOR_SKILLS_ROOT` (colon-separated) wins so
+ * tests and operators can pin the root; otherwise the pack dir plus every
+ * runtime skills dir.
+ */
+export function skillsRoots(env: Record<string, string | undefined> = process.env): string[] {
+  const raw = env.INTERCEPTOR_SKILLS_ROOT
+  if (raw && raw.trim()) {
+    return raw.split(":").map(s => s.trim()).filter(Boolean).map(p => resolve(p))
+  }
+  const roots: string[] = []
+  const pack = resolvePackDir()
+  if (pack) roots.push(resolve(pack))
+  for (const t of allTargets(homedir(), env)) roots.push(resolve(t.dir))
+  return roots
+}
+
+function lexicalInside(root: string, abs: string): boolean {
+  const rel = relative(resolve(root), abs)
+  return !!rel && !rel.startsWith("..") && !isAbsolute(rel)
+}
+
+/** Strict descendant of a skills root. The root itself, and symlink escapes, are outside. */
+export function pathInsideSkillsRoot(candidate: string, roots: string[]): boolean {
+  if (!candidate || candidate.includes("\0")) return false
+  const abs = resolve(candidate)
+  // A missing path has no realpath. Compare lexically so /var vs /private/var
+  // (macOS) does not reject a path that was built from the root we were given.
+  if (!existsSync(abs)) return roots.some(root => lexicalInside(root, abs))
+  let real: string
+  try { real = realpathSync(abs) } catch { return false }
+  for (const root of roots) {
+    let rr = resolve(root)
+    try { if (existsSync(rr)) rr = realpathSync(rr) } catch { continue }
+    const rel = relative(rr, real)
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return true
+  }
+  return false
+}
+
+/**
+ * Tokens unadopt will interpret. Safe skill names are skipped; anything else
+ * must sit inside a skills root or the call is refused before any unlink.
+ */
+export function unadoptCandidates(name: string | undefined, path: string | undefined, args: string[] = []): string[] {
+  const out: string[] = []
+  if (path) out.push(path)
+  if (name) out.push(name)
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === "--path" && args[i + 1]) { out.push(args[++i]); continue }
+    if (a.startsWith("--path=")) { out.push(a.slice("--path=".length)); continue }
+    if (a.startsWith("-")) continue
+    out.push(a)
+  }
+  return out
+}
+
+export function unadoptRefusal(candidates: string[], roots = skillsRoots()): string | null {
+  for (const c of candidates) {
+    if (isSafeSkillName(c)) continue
+    if (!pathInsideSkillsRoot(c, roots)) return `unadopt refuses paths outside the skills root: ${c}`
+  }
+  return null
 }
 
 // ── classification ────────────────────────────────────────────────────────────
@@ -377,6 +448,74 @@ export function runSkillsCommand(filtered: string[], jsonMode: boolean): null {
     return null
   }
 
-  console.error(`error: unknown skills subcommand '${sub}'. Usage: interceptor skills [list|status|show <name>|adopt [names…] [--into t1,t2] [--all] [--force]]`)
+  if (sub === "unadopt") {
+    const intoIds = parseInto(filtered)
+    const targets = intoIds
+      ? allTargets().filter(t => intoIds.includes(t.id))
+      : detectedTargets()
+    const pathIdx = filtered.indexOf("--path")
+    const pathArg = pathIdx === -1 ? undefined : filtered[pathIdx + 1]
+    if (pathIdx !== -1 && (!pathArg || pathArg.startsWith("--"))) {
+      console.error("error: --path requires a path inside the skills root")
+      process.exit(1)
+    }
+    const nameArgs: string[] = []
+    for (let i = 2; i < filtered.length; i++) {
+      if (filtered[i].startsWith("--")) {
+        if (filtered[i] === "--path" || filtered[i] === "--into") i++
+        continue
+      }
+      nameArgs.push(filtered[i])
+    }
+    const refusal = unadoptRefusal(unadoptCandidates(nameArgs[0], pathArg, nameArgs.slice(1)))
+    if (refusal) {
+      console.error(`error: ${refusal}`)
+      process.exit(1)
+    }
+    if (!pathArg && nameArgs.length === 0) {
+      console.error("error: unadopt requires a skill name or --path inside the skills root")
+      process.exit(1)
+    }
+    const results: Array<{ target: string; skill: string; action: string; detail?: string }> = []
+    if (pathArg) {
+      let st
+      try { st = lstatSync(pathArg) } catch { st = undefined }
+      if (st?.isSymbolicLink()) {
+        unlinkSync(pathArg)
+        results.push({ target: "path", skill: pathArg, action: "unlinked" })
+      } else {
+        results.push({ target: "path", skill: pathArg, action: "skipped", detail: "not a symlink" })
+      }
+    }
+    for (const name of nameArgs.filter(isSafeSkillName)) {
+      for (const t of targets) {
+        const dst = join(t.dir, name)
+        let st
+        try { st = lstatSync(dst) } catch { st = undefined }
+        if (!st) {
+          results.push({ target: t.id, skill: name, action: "missing" })
+          continue
+        }
+        if (!st.isSymbolicLink()) {
+          results.push({ target: t.id, skill: name, action: "skipped", detail: "not a symlink" })
+          continue
+        }
+        const inside = pathInsideSkillsRoot(dst, [t.dir])
+        if (!inside) {
+          results.push({ target: t.id, skill: name, action: "refused", detail: "outside the skills root" })
+          continue
+        }
+        unlinkSync(dst)
+        results.push({ target: t.id, skill: name, action: "unlinked" })
+      }
+    }
+    if (jsonMode) console.log(JSON.stringify({ success: true, results }, null, 2))
+    else {
+      for (const r of results) console.log(`${r.action === "unlinked" ? "✓" : "·"} ${r.target}/${r.skill}: ${r.action}${r.detail ? ` — ${r.detail}` : ""}`)
+    }
+    return null
+  }
+
+  console.error(`error: unknown skills subcommand '${sub}'. Usage: interceptor skills [list|status|show <name>|adopt [names…] [--into t1,t2] [--all] [--force]|unadopt [names…] [--path <path-inside-skills-root>]]`)
   process.exit(1)
 }

@@ -1306,7 +1306,7 @@ The skill packages mirror the surface split:
 
 ## MCP Server: Python Port (read, local, mutate, and gate)
 
-`cli/mcp/` (imported from the `v0.23.37` upstream tag, unmodified, kept as the reference) is the TypeScript MCP server.
+`cli/mcp/` (imported from the `v0.23.37` upstream tag and kept as the reference) is the TypeScript MCP server. Discovery resources, the skills tool, timeout-kill, and the explicit verb table were added on that reference and mirrored in Python.
 `python/interceptor_mcp/` is a stdlib-only Python port of `interceptor_read`, `interceptor_local` (`local` minus `upgrade`),
 `interceptor_browser`, `interceptor_macos`, `interceptor_ios`, and `interceptor_raw`, plus the `interceptor://manifest` resource.
 Like the reference it is a thin subprocess wrapper over the `interceptor` CLI (`--json` and all other args pass through verbatim),
@@ -1319,7 +1319,7 @@ Either key alone refuses, and nothing reaches the CLI. `interceptor_raw` is regi
 includes `raw` or `ext`. `all` does not turn it on. When raw is on, argv must start with the verb (a leading `-` flag is refused), and the verb is classified and gated.
 An unknown sub-verb of a mixed family (`macos vm frobnicate`) takes that family's highest tier and is refused.
 
-Not ported yet: the help/extensions resources and skills wiring. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
+Discovery resources (`interceptor://help/macos`, `interceptor://help/ios`, `interceptor://help/{verb}`, `interceptor://extensions`) and the skills tool (`list` / `status` / `show` / `adopt` / `unadopt`) are ported. `adopt` and `unadopt` go through the operator gate at mutate minimum. `unadopt` refuses any path outside the skills root and does not reach the CLI. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
 `python3 -m interceptor_mcp` warms the daemon via `interceptor contexts` unless `--no-warm` is set.
 
 ### iOS input stays mutate
@@ -1328,8 +1328,8 @@ Upstream classifies iOS input (`click`, `type`, `keys`, `scroll`, `drag`, `press
 **mutate**, so those verbs run without `INTERCEPTOR_MCP_ALLOW`. Elevating them to **destructive** — because an unattended
 agent can drive a physical phone — was considered and not adopted:
 
-- `cli/mcp/tiers.ts` is the contract both implementations match. It was imported unmodified from v0.23.37. A Python-only
-  elevation would make the conformance suite lie; changing the reference is out of scope for this port.
+- `cli/mcp/tiers.ts` is the contract both implementations match. iOS input tiers are unchanged from the v0.23.37 import. A Python-only
+  elevation would make the conformance suite lie.
 - iOS input is the same class as browser and macOS input. The irreversible iOS verbs are already destructive or exec
   (`setup`, `refresh`, `install`, `login`, `logout`, `kill`, `app terminate`, `fs push`, `location set`,
   `profiles install` / `remove`, `eval`, `spawn`, `web eval`, `web call`).
@@ -1350,8 +1350,10 @@ claude mcp add interceptor -- env PYTHONPATH=$PWD/python python3 -m interceptor_
 The conformance suite runs the same cases against the TypeScript reference and the Python port, with the CLI replaced by
 `test/mcp-conformance/fake_interceptor.py`. It covers tree/text/find/screenshot/status/manifest/diagnose, flag and group
 injection, fencing, browser/macOS/iOS mutate verbs (click/type/keys/scroll/navigate/tab/app activate), the
-allowlist-plus-confirm double key, `interceptor_raw` off by default, and refusal of every destructive/exec verb
-(including an unknown sub-verb such as `macos vm frobnicate`) with nothing reaching the CLI.
+allowlist-plus-confirm double key, `interceptor_raw` off by default, refusal of every destructive/exec verb
+(including an unknown sub-verb such as `macos vm frobnicate`) with nothing reaching the CLI, discovery resources,
+skills adopt/unadopt (foreign-path refusal), output fencing, and timeout-kill. A drift check fails loudly when the
+CLI gains a verb the MCP classification does not name.
 
 ```bash
 bun install                                              # once; the TS side needs @modelcontextprotocol/sdk
