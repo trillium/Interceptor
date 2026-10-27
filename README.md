@@ -1304,18 +1304,40 @@ The skill packages mirror the surface split:
 - [`.agents/skills/interceptor/`](.agents/skills/interceptor/) — thin index skill: surface decision table + pointers. Kept as a compatibility shim for one release.
 - `.agents/skills/interceptor-windows/` — **reserved path, not yet created.** Slot for the future Windows surface; do not create until the surface ships.
 
-## MCP Server: Python Port (read, local, and mutate tools)
+## MCP Server: Python Port (read, local, mutate, and gate)
 
 `cli/mcp/` (imported from the `v0.23.37` upstream tag, unmodified, kept as the reference) is the TypeScript MCP server.
 `python/interceptor_mcp/` is a stdlib-only Python port of `interceptor_read`, `interceptor_local` (`local` minus `upgrade`),
-`interceptor_browser`, `interceptor_macos`, and `interceptor_ios`, plus the `interceptor://manifest` resource.
+`interceptor_browser`, `interceptor_macos`, `interceptor_ios`, and `interceptor_raw`, plus the `interceptor://manifest` resource.
 Like the reference it is a thin subprocess wrapper over the `interceptor` CLI (`--json` and all other args pass through verbatim),
 fences captured content, injects the `INTERCEPTOR_MCP_GROUP` tab group on browser calls, and gates on the
-`INTERCEPTOR_MCP_ALLOW` operator allowlist using the tier table copied from `cli/mcp/tiers.ts`.
-Destructive and exec verbs are refused by default and never reach the CLI.
-Not ported yet: `interceptor_raw`, the help/extensions resources, and skills wiring.
-The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
+`INTERCEPTOR_MCP_ALLOW` operator allowlist using `classify` / `gate` / `parseAllow` ported from `cli/mcp/tiers.ts`.
+
+Read and mutate run by default. Destructive and exec stay refused until the operator allowlists the tier
+(`destructive`, `arbitrary-exec` or `exec`), a `surface:verb`, or `all`, **and** the call passes `confirm: true`.
+Either key alone refuses, and nothing reaches the CLI. `interceptor_raw` is registered but disabled unless the allowlist
+includes `raw` or `ext`. `all` does not turn it on. When raw is on, the underlying argv is still classified and gated.
+An unknown sub-verb of a mixed family (`macos vm frobnicate`) takes that family's highest tier and is refused.
+
+Not ported yet: the help/extensions resources and skills wiring. The CLI binary is `INTERCEPTOR_BIN` (default: `interceptor` on `PATH`).
 `python3 -m interceptor_mcp` warms the daemon via `interceptor contexts` unless `--no-warm` is set.
+
+### iOS input stays mutate
+
+Upstream classifies iOS input (`click`, `type`, `keys`, `scroll`, `drag`, `press`, plus `app launch` / `activate`) as
+**mutate**, so those verbs run without `INTERCEPTOR_MCP_ALLOW`. Elevating them to **destructive** — because an unattended
+agent can drive a physical phone — was considered and not adopted:
+
+- `cli/mcp/tiers.ts` is the contract both implementations match. It was imported unmodified from v0.23.37. A Python-only
+  elevation would make the conformance suite lie; changing the reference is out of scope for this port.
+- iOS input is the same class as browser and macOS input. The irreversible iOS verbs are already destructive or exec
+  (`setup`, `refresh`, `install`, `login`, `logout`, `kill`, `app terminate`, `fs push`, `location set`,
+  `profiles install` / `remove`, `eval`, `spawn`, `web eval`, `web call`).
+- Putting taps in `destructive` would force an operator who only wants to drive the phone to also allow `vm delete`,
+  `app quit`, and the rest of that tier. That switch is coarser than the risk.
+
+An operator who does not want the phone driven does not expose `interceptor_ios`. This port does not add a stricter
+Python-only tier.
 
 ```bash
 # run the server (newline-delimited JSON-RPC on stdio; no dependencies beyond Python 3.9+)
@@ -1327,9 +1349,9 @@ claude mcp add interceptor -- env PYTHONPATH=$PWD/python python3 -m interceptor_
 
 The conformance suite runs the same cases against the TypeScript reference and the Python port, with the CLI replaced by
 `test/mcp-conformance/fake_interceptor.py`. It covers tree/text/find/screenshot/status/manifest/diagnose, flag and group
-injection, fencing, browser/macOS/iOS mutate verbs (click/type/keys/scroll/navigate/tab/app activate), plus refusal proofs
-for unknown verbs, destructive/exec verbs on the default allowlist, tier-gate bypass, and path-traversal verbs / resource URIs
-(a refused call must never reach the CLI).
+injection, fencing, browser/macOS/iOS mutate verbs (click/type/keys/scroll/navigate/tab/app activate), the
+allowlist-plus-confirm double key, `interceptor_raw` off by default, and refusal of every destructive/exec verb
+(including an unknown sub-verb such as `macos vm frobnicate`) with nothing reaching the CLI.
 
 ```bash
 bun install                                              # once; the TS side needs @modelcontextprotocol/sdk

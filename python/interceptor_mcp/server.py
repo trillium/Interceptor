@@ -5,10 +5,13 @@ Mirrors cli/mcp/server.ts: a thin subprocess wrapper around the `interceptor` CL
 with content-bearing output fenced (output.py). Speaks newline-delimited JSON-RPC
 (MCP stdio transport).
 
-This slice adds interceptor_browser, interceptor_macos, and interceptor_ios
-(same verb enums and tier gate as the reference). Still absent, matching the
-gate/discovery slices: interceptor_raw, `local upgrade`, and the help/extensions
-resources.
+interceptor_browser, interceptor_macos, and interceptor_ios use the reference verb
+enums and the tier gate. interceptor_raw is registered and off unless the operator
+allowlist includes `raw` (or `ext`). `all` does not enable it. When raw is on, the
+argv is still classified and gated — confirm is the second key, never a substitute
+for the allowlist.
+
+Still absent: `local upgrade`, and the help/extensions resources.
 """
 
 from __future__ import annotations
@@ -67,9 +70,21 @@ MACOS_VERB_NAMES = [v for v, _ in MACOS_VERBS]
 IOS_VERB_NAMES = [v for v, _ in IOS_VERBS]
 
 
-def _schema(props: dict, required: list[str]) -> dict:
-    return {"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
-            "properties": props, "required": required, "additionalProperties": False}
+def _schema(props: dict, required: list[str], *, forbid_extra: bool = True) -> dict:
+    schema = {"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+              "properties": props, "required": required}
+    if forbid_extra:
+        schema["additionalProperties"] = False
+    return schema
+
+
+def split_raw_argv(args: list[str]) -> tuple[str, str, list[str]]:
+    """Surface/verb split for interceptor_raw. Matches cli/mcp/server.ts."""
+    if args and args[0] == "macos":
+        return "macos", args[1] if len(args) > 1 else "", args[2:]
+    if args and args[0] == "ios":
+        return "ios", args[1] if len(args) > 1 else "", args[2:]
+    return "browser", args[0] if args else "", args[1:]
 
 
 def _str(desc: Optional[str] = None, enum: Optional[list[str]] = None) -> dict:
@@ -167,6 +182,23 @@ TOOLS: list[dict] = [
         }, ["verb"]),
         "annotations": {"readOnlyHint": True},
     },
+    {
+        "name": "interceptor_raw",
+        "title": "Interceptor — raw passthrough",
+        "description": (
+            "Run `interceptor` with verbatim args (extension verbs, exotic flag combos). DISABLED unless the operator set "
+            "INTERCEPTOR_MCP_ALLOW to include `raw`. The underlying verb is still tier-classified and gated."
+        ),
+        "inputSchema": _schema({
+            "args": {
+                "minItems": 1,
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "full interceptor argv, verbatim",
+            },
+            "confirm": {"type": "boolean"},
+        }, ["args"], forbid_extra=False),
+    },
 ]
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
@@ -203,6 +235,8 @@ def _validate(tool: dict, args: Any) -> Optional[str]:
         elif t == "array":
             if not isinstance(v, list):
                 return f"Invalid input: expected array at {name}"
+            if spec.get("minItems") and len(v) < spec["minItems"]:
+                return f"Invalid input: expected at least {spec['minItems']} item(s) at {name}"
             if not all(isinstance(x, str) for x in v):
                 return f"Invalid input: expected string at {name}[]"
     return None
@@ -282,12 +316,28 @@ def _tool_local(session: Session, a: dict) -> dict:
     return output.to_result("local", verb, run.stdout, run.stderr, run.code, session.fence)
 
 
+_RAW_OFF = "interceptor_raw is disabled. Operator must relaunch with INTERCEPTOR_MCP_ALLOW=raw."
+
+
+def _tool_raw(session: Session, a: dict) -> dict:
+    if not tiers.parse_allow(session.allow_env).raw:
+        return _text_error(_RAW_OFF)
+    args = a["args"]
+    surface, verb, rest = split_raw_argv(args)
+    return _run_verb(
+        session, surface, verb, rest,
+        {"group": session.group, "confirm": a.get("confirm")},
+        args,
+    )
+
+
 _HANDLERS: dict[str, Callable[[Session, dict], dict]] = {
     "interceptor_browser": _tool_browser,
     "interceptor_macos": _tool_macos,
     "interceptor_ios": _tool_ios,
     "interceptor_read": _tool_read,
     "interceptor_local": _tool_local,
+    "interceptor_raw": _tool_raw,
 }
 
 

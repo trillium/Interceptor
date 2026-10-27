@@ -1,1 +1,1 @@
-"""Interceptor MCP server — Python stdlib port of cli/mcp (read, local, and mutate tools)."""
+"""Interceptor MCP server — Python stdlib port of cli/mcp (read, local, mutate, and raw/gate)."""

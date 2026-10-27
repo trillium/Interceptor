@@ -8,6 +8,10 @@ The `interceptor` CLI is replaced by test/mcp-conformance/fake_interceptor.py
 (INTERCEPTOR_BIN), which logs every argv to $FAKE_LOG so tests can prove both what
 reached the CLI and — for refusals — that nothing did.
 
+Gate cases (destructive/exec, unknown sub-verb floor, allow+confirm, raw off by
+default) run against both servers. The classifier itself is also compared to
+cli/mcp/tiers.ts via ts_tiers.ts.
+
   python3 test/mcp-conformance/test_conformance.py            # both (default)
   MCP_IMPL=py python3 test/mcp-conformance/test_conformance.py  # one implementation
 """
@@ -29,6 +33,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 FAKE = os.path.join(HERE, "fake_interceptor.py")
 GROUP = "conf-group"
+sys.path.insert(0, os.path.join(ROOT, "python"))
+sys.path.insert(0, HERE)
+
+import gate_cases  # noqa: E402
+from interceptor_mcp import tiers  # noqa: E402
+from interceptor_mcp.server import split_raw_argv  # noqa: E402
+
+FROB_DISABLED = (
+    "'macos vm frobnicate' is DESTRUCTIVE and disabled. "
+    "The OPERATOR (not the model) must relaunch interceptor-mcp with "
+    "INTERCEPTOR_MCP_ALLOW=destructive (or =macos:vm, or =all) to enable it."
+)
+FROB_NEEDS_CONFIRM = (
+    "'macos vm frobnicate' is DESTRUCTIVE and operator-allowed, "
+    "but requires confirm:true on this call to proceed."
+)
+RAW_OFF = "interceptor_raw is disabled. Operator must relaunch with INTERCEPTOR_MCP_ALLOW=raw."
 
 IMPLS = {
     "ts": {"cmd": ["bun", os.path.join(HERE, "ts_entry.ts"), "__serve"], "env": {}},
@@ -297,6 +318,150 @@ class Conformance:
         finally:
             c.close()
 
+    def _tools(self) -> dict:
+        return {t["name"]: t for t in self.client.rpc("tools/list")["result"]["tools"]}
+
+    def test_raw_off_by_default(self):
+        raw = self._tools()["interceptor_raw"]
+        self.assertNotIn("annotations", raw)
+        self.assertEqual(raw["title"], "Interceptor — raw passthrough")
+        self.assertRefused(self.client.call("interceptor_raw", args=["macos", "vm", "frobnicate"]), RAW_OFF)
+        self.assertRefused(self.client.call("interceptor_raw", args=["macos", "vm", "delete"], confirm=True), RAW_OFF)
+        self.assertRefused(self.client.call("interceptor_raw", args=[]), "Input validation")
+        self.assertRefused(self.client.call("interceptor_raw", args=[1]), "Input validation")
+        self.assertRefused(self.client.call("interceptor_raw", confirm="yes", args=["status"]), "Input validation")
+
+    def test_all_does_not_enable_raw(self):
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "all"})
+        try:
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"], confirm=True)
+            self.assertTrue(res.get("isError"), res)
+            self.assertIn(RAW_OFF, text_of(res))
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+
+    def test_unknown_subverb_defaults_high(self):
+        # Named acceptance probe. Surface tool is the default path when the mutate
+        # slice is present (always on the TS reference). Raw is the path both have.
+        tools = self._tools()
+        if "interceptor_macos" not in tools:
+            self.fail(f"{self.impl} must expose interceptor_macos so the gate can refuse macos vm frobnicate")
+        self.assertRefused(self.client.call("interceptor_macos", verb="vm", args=["frobnicate"]), FROB_DISABLED)
+        self.assertRefused(
+            self.client.call("interceptor_macos", verb="vm", args=["frobnicate"], confirm=True), FROB_DISABLED)
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw"})
+        try:
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"])
+            self.assertTrue(res.get("isError"), res)
+            self.assertEqual(text_of(res), FROB_DISABLED)
+            self.assertEqual(c.calls(), [])
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"], confirm=True)
+            self.assertEqual(text_of(res), FROB_DISABLED)
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+
+    def test_every_high_tier_verb_refused_without_its_allow(self):
+        probes = gate_cases.high_tier_probes()
+        self.assertGreater(len(probes), 40)
+        tools = self._tools()
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw"})
+        try:
+            for argv, tier in probes:
+                c.reset()
+                res = c.call("interceptor_raw", args=argv)
+                msg = text_of(res)
+                self.assertTrue(res.get("isError"), (argv, msg))
+                self.assertIn(f"{tier.upper()} and disabled", msg, argv)
+                flag = "arbitrary-exec" if tier == "exec" else "destructive"
+                self.assertIn(f"INTERCEPTOR_MCP_ALLOW={flag}", msg, argv)
+                self.assertIn("The OPERATOR (not the model)", msg, argv)
+                self.assertEqual(c.calls(), [], argv)
+                if "interceptor_macos" not in tools and "interceptor_browser" not in tools:
+                    continue
+                surface, verb, rest = split_raw_argv(argv)
+                tool = {"browser": "interceptor_browser", "macos": "interceptor_macos",
+                        "ios": "interceptor_ios"}.get(surface)
+                spec = tools.get(tool or "")
+                if not spec or verb not in spec["inputSchema"]["properties"]["verb"]["enum"]:
+                    continue
+                self.client.reset()
+                self.assertRefused(self.client.call(tool, verb=verb, args=rest), f"{tier.upper()} and disabled")
+        finally:
+            c.close()
+
+    def test_allow_and_confirm_admits_high_tier(self):
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw,destructive"})
+        try:
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"])
+            self.assertEqual(text_of(res), FROB_NEEDS_CONFIRM)
+            self.assertEqual(c.calls(), [])
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"], confirm=True)
+            self.assertFalse(res.get("isError"), text_of(res))
+            self.assertEqual(c.calls(), [["macos", "vm", "frobnicate"]])
+            c.reset()
+            res = c.call("interceptor_raw", args=["eval", "1"], confirm=True)
+            self.assertIn("EXEC and disabled", text_of(res))
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw,arbitrary-exec"})
+        try:
+            res = c.call("interceptor_raw", args=["eval", "1"])
+            self.assertIn("requires confirm:true", text_of(res))
+            self.assertEqual(c.calls(), [])
+            res = c.call("interceptor_raw", args=["eval", "1"], confirm=True)
+            self.assertFalse(res.get("isError"), text_of(res))
+            self.assertEqual(c.calls(), [["eval", "1", "--group", GROUP]])
+            c.reset()
+            res = c.call("interceptor_raw", args=["macos", "vm", "frobnicate"], confirm=True)
+            self.assertEqual(text_of(res), FROB_DISABLED)
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw,macos:vm"})
+        try:
+            res = c.call("interceptor_raw", args=["macos", "vm", "delete", "box"], confirm=True)
+            self.assertFalse(res.get("isError"), text_of(res))
+            self.assertEqual(c.calls(), [["macos", "vm", "delete", "box"]])
+            c.reset()
+            res = c.call("interceptor_raw", args=["ios", "kill", "1"], confirm=True)
+            self.assertIn("DESTRUCTIVE and disabled", text_of(res))
+            self.assertEqual(c.calls(), [])
+        finally:
+            c.close()
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "ext,all"})
+        try:
+            res = c.call("interceptor_raw", args=["macos", "script", "beep"], confirm=True)
+            self.assertFalse(res.get("isError"), text_of(res))
+            self.assertEqual(c.calls(), [["macos", "script", "beep"]])
+        finally:
+            c.close()
+
+    def test_ios_input_stays_mutate_and_raw_still_runs_reads(self):
+        """iOS click/type/keys/scroll/drag/press stay mutate. See README."""
+        c = Client(self.impl, {"INTERCEPTOR_MCP_ALLOW": "raw"})
+        try:
+            for argv in gate_cases.admitted_under_raw():
+                surface, verb, rest = split_raw_argv(argv)
+                got = tiers.classify(surface, verb, rest)
+                self.assertIn(got.tier, ("read", "mutate"), argv)
+                if argv[0] == "ios" and verb in ("click", "type", "keys", "scroll", "drag", "press"):
+                    self.assertEqual(got.tier, "mutate", argv)
+            res = c.call("interceptor_raw", args=["ios", "click", "e1"])
+            self.assertFalse(res.get("isError"), text_of(res))
+            self.assertEqual(c.calls(), [["ios", "click", "e1"]])
+        finally:
+            c.close()
+        tools = self._tools()
+        if "interceptor_ios" not in tools:
+            self.fail(f"{self.impl} must expose interceptor_ios")
+        self.client.reset()
+        res = self.client.call("interceptor_ios", verb="click", args=["e1"])
+        self.assertFalse(res.get("isError"), text_of(res))
+        self.assertEqual(self.client.calls(), [["ios", "click", "e1"]])
+
     def test_refuses_path_traversal_verbs(self):
         for v in ("../../bin/sh", "..", "/etc/passwd", "tree/../eval", "tree\x00"):
             self.assertRefused(self.client.call("interceptor_read", surface="browser", verb=v), "Input validation")
@@ -422,10 +587,87 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001
     if len(ENABLED) == 2:
         suite.addTest(CrossImpl("test_same_read_menu"))
         suite.addTest(CrossImpl("test_same_mutate_menus"))
+        suite.addTest(CrossImpl("test_same_raw_tool"))
+    if "ts" in ENABLED:
+        suite.addTest(TierParity("test_python_matches_reference"))
     if "py" in ENABLED:
         suite.addTest(PythonOnly("test_local_upgrade_not_offered"))
-        suite.addTest(PythonOnly("test_raw_and_help_resources_not_offered"))
+        suite.addTest(PythonOnly("test_help_resources_not_offered"))
     return suite
+
+
+def ts_tier_batch(reqs: list[dict]) -> list[dict]:
+    proc = subprocess.run(
+        ["bun", os.path.join(HERE, "ts_tiers.ts")],
+        input=json.dumps(reqs), text=True, capture_output=True, cwd=ROOT, timeout=60,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+    return json.loads(proc.stdout)
+
+
+def _py_allow(env):
+    a = tiers.parse_allow(env)
+    return {"tiers": sorted(a.tiers), "verbs": sorted(a.verbs), "raw": a.raw, "all": a.all}
+
+
+class TierParity(unittest.TestCase):
+    """Python classify/gate/parseAllow must match cli/mcp/tiers.ts exactly."""
+
+    def test_python_matches_reference(self):
+        reqs = []
+        expected = []
+        for argv, tier in gate_cases.high_tier_probes():
+            surface, verb, rest = split_raw_argv(argv)
+            reqs.append({"op": "classify", "surface": surface, "verb": verb, "args": rest})
+            expected.append((argv, tier))
+        for argv in gate_cases.admitted_under_raw():
+            surface, verb, rest = split_raw_argv(argv)
+            reqs.append({"op": "classify", "surface": surface, "verb": verb, "args": rest})
+            py = tiers.classify(surface, verb, rest)
+            self.assertIn(py.tier, ("read", "mutate"), argv)
+            expected.append((argv, py.tier))
+        got = ts_tier_batch(reqs)
+        self.assertEqual(len(got), len(expected))
+        for (argv, tier), ts in zip(expected, got):
+            surface, verb, rest = split_raw_argv(argv)
+            py = tiers.classify(surface, verb, rest)
+            self.assertEqual(py.tier, tier, argv)
+            self.assertEqual(ts["tier"], tier, argv)
+            self.assertEqual(py.sub, ts["sub"], argv)
+
+        gate_reqs = [
+            {"op": "gate", "surface": "macos", "verb": "vm", "args": ["frobnicate"], "confirm": False},
+            {"op": "gate", "surface": "macos", "verb": "vm", "args": ["frobnicate"], "allow": "destructive", "confirm": False},
+            {"op": "gate", "surface": "macos", "verb": "vm", "args": ["frobnicate"], "allow": "destructive", "confirm": True},
+            {"op": "gate", "surface": "macos", "verb": "vm", "args": ["delete", "x"], "allow": "macos:vm", "confirm": True},
+            {"op": "gate", "surface": "browser", "verb": "eval", "args": ["1"], "allow": "destructive", "confirm": True},
+            {"op": "gate", "surface": "browser", "verb": "eval", "args": ["1"], "allow": "arbitrary-exec", "confirm": True},
+            {"op": "gate", "surface": "browser", "verb": "eval", "args": ["1"], "allow": "exec", "confirm": True},
+            {"op": "gate", "surface": "ios", "verb": "click", "args": ["e1"], "confirm": False},
+            {"op": "parseAllow", "env": None},
+            {"op": "parseAllow", "env": "destructive, arbitrary-exec, raw, macos:vm"},
+            {"op": "parseAllow", "env": "all"},
+            {"op": "parseAllow", "env": "EXT"},
+            {"op": "parseAllow", "env": "  Destructive , RAW "},
+        ]
+        gg = ts_tier_batch(gate_reqs)
+        for req, ts in zip(gate_reqs, gg):
+            if req["op"] == "parseAllow":
+                self.assertEqual(_py_allow(req["env"]), ts, req)
+                continue
+            py_c = tiers.classify(req["surface"], req["verb"], req["args"])
+            py_g = tiers.gate(py_c, tiers.parse_allow(req.get("allow")), req.get("confirm") is True)
+            self.assertEqual(py_g.allowed, ts["allowed"], req)
+            self.assertEqual(py_g.needs_confirm, ts["needsConfirm"], req)
+            self.assertEqual(py_g.reason, ts["reason"], req)
+        self.assertEqual(gg[0]["reason"], FROB_DISABLED)
+        self.assertEqual(gg[1]["needsConfirm"], True)
+        self.assertEqual(gg[1]["reason"], FROB_NEEDS_CONFIRM)
+        self.assertTrue(gg[2]["allowed"])
+        self.assertEqual(gg[7]["tier"], "mutate")
+        self.assertFalse(gg[10]["raw"])  # all does not enable raw
+        self.assertTrue(gg[11]["raw"])
 
 
 class CrossImpl(unittest.TestCase):
@@ -461,9 +703,23 @@ class CrossImpl(unittest.TestCase):
                 set(py["inputSchema"]["properties"]),
                 name)
 
+    def test_same_raw_tool(self):
+        tools = {}
+        for impl in ENABLED:
+            c = Client(impl)
+            try:
+                tools[impl] = {t["name"]: t for t in c.rpc("tools/list")["result"]["tools"]}["interceptor_raw"]
+            finally:
+                c.close()
+        ts, py = tools["ts"], tools["py"]
+        self.assertEqual(ts["title"], py["title"])
+        self.assertEqual(ts["description"], py["description"])
+        self.assertEqual(ts["inputSchema"], py["inputSchema"])
+        self.assertEqual(ts.get("annotations"), py.get("annotations"))
+
 
 class PythonOnly(unittest.TestCase):
-    """Deliberate omissions versus the reference: local upgrade, raw, discovery resources."""
+    """Deliberate omissions versus the reference: local upgrade and discovery resources."""
 
     def test_local_upgrade_not_offered(self):
         c = Client("py")
@@ -474,14 +730,9 @@ class PythonOnly(unittest.TestCase):
         finally:
             c.close()
 
-    def test_raw_and_help_resources_not_offered(self):
+    def test_help_resources_not_offered(self):
         c = Client("py")
         try:
-            names = {t["name"] for t in c.rpc("tools/list")["result"]["tools"]}
-            self.assertNotIn("interceptor_raw", names)
-            res = c.call("interceptor_raw", args=["eval", "1"])
-            self.assertTrue(res["isError"])
-            self.assertIn("not found", text_of(res))
             uris = {r["uri"] for r in c.rpc("resources/list")["result"]["resources"]}
             self.assertEqual(uris, {"interceptor://manifest"})
             self.assertEqual(c.calls(), [])
