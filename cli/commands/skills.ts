@@ -156,24 +156,26 @@ export function pathInsideSkillsRoot(candidate: string, roots: string[]): boolea
  * Tokens unadopt will interpret. Safe skill names are skipped; anything else
  * must sit inside a skills root or the call is refused before any unlink.
  */
-export function unadoptCandidates(name: string | undefined, path: string | undefined, args: string[] = []): string[] {
-  const out: string[] = []
-  if (path) out.push(path)
-  if (name) out.push(name)
+export interface UnadoptCandidate { value: string; isPath: boolean }
+
+export function unadoptCandidates(name: string | undefined, path: string | undefined, args: string[] = []): UnadoptCandidate[] {
+  const out: UnadoptCandidate[] = []
+  if (path) out.push({ value: path, isPath: true })
+  if (name) out.push({ value: name, isPath: false })
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
-    if (a === "--path" && args[i + 1]) { out.push(args[++i]); continue }
-    if (a.startsWith("--path=")) { out.push(a.slice("--path=".length)); continue }
+    if (a === "--path" && args[i + 1]) { out.push({ value: args[++i], isPath: true }); continue }
+    if (a.startsWith("--path=")) { out.push({ value: a.slice("--path=".length), isPath: true }); continue }
     if (a.startsWith("-")) continue
-    out.push(a)
+    out.push({ value: a, isPath: false })
   }
   return out
 }
 
-export function unadoptRefusal(candidates: string[], roots = skillsRoots()): string | null {
+export function unadoptRefusal(candidates: UnadoptCandidate[], roots = skillsRoots()): string | null {
   for (const c of candidates) {
-    if (isSafeSkillName(c)) continue
-    if (!pathInsideSkillsRoot(c, roots)) return `unadopt refuses paths outside the skills root: ${c}`
+    if (!c.isPath && isSafeSkillName(c.value)) continue
+    if (!pathInsideSkillsRoot(c.value, roots)) return `unadopt refuses paths outside the skills root: ${c.value}`
   }
   return null
 }

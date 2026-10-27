@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, lstatSync, realpathSync,
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-import { classifyLink, adoptSkill, discoverSkills, allTargets, pathInsideSkillsRoot, unadoptRefusal, type SkillTarget, type SkillInfo } from "../cli/commands/skills"
+import { classifyLink, adoptSkill, discoverSkills, allTargets, pathInsideSkillsRoot, unadoptRefusal, unadoptCandidates, type SkillTarget, type SkillInfo } from "../cli/commands/skills"
 
 let root: string
 let packDir: string
@@ -136,8 +136,10 @@ describe("unadopt foreign-path refusal", () => {
     expect(pathInsideSkillsRoot(join(root, "linked"), roots)).toBe(true)
     expect(pathInsideSkillsRoot("/etc/passwd", roots)).toBe(false)
     expect(pathInsideSkillsRoot(root + "-evil/x", roots)).toBe(false)
-    expect(unadoptRefusal(["interceptor-browser"], roots)).toBeNull()
-    expect(unadoptRefusal(["/etc/passwd"], roots)).toBe("unadopt refuses paths outside the skills root: /etc/passwd")
-    expect(unadoptRefusal(["../.ssh"], roots)).toContain("outside the skills root")
+    expect(unadoptRefusal(unadoptCandidates("interceptor-browser", undefined), roots)).toBeNull()
+    expect(unadoptRefusal(unadoptCandidates(undefined, "/etc/passwd"), roots)).toBe("unadopt refuses paths outside the skills root: /etc/passwd")
+    expect(unadoptRefusal(unadoptCandidates("../.ssh", undefined), roots)).toContain("outside the skills root")
+    expect(unadoptRefusal(unadoptCandidates(undefined, "foo"), roots)).toBe("unadopt refuses paths outside the skills root: foo")
+    expect(unadoptRefusal(unadoptCandidates(undefined, undefined, ["--path", "foo"]), roots)).toContain("outside the skills root")
   })
 })

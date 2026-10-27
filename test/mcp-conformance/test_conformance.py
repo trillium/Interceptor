@@ -661,11 +661,25 @@ class Conformance:
             {"name": "../.ssh"},
             {"args": ["--path", "/etc/passwd"]},
             {"name": "ok", "path": "/tmp/not-the-skills-root/x"},
+            {"path": "foo"},
+            {"args": ["--path", "foo"]},
+            {"args": ["--path=foo"]},
         ]
         for kwargs in cases:
             self.client.reset()
             res = self.client.call("interceptor_skills", op="unadopt", **kwargs)
             self.assertRefused(res, "unadopt refuses paths outside the skills root")
+
+    def test_unadopt_bare_path_symlink_in_cwd_is_refused_and_kept(self):
+        link = os.path.join(self.client.tmp, "foo")
+        target = os.path.join(self.client.tmp, "foo-target")
+        os.makedirs(target, exist_ok=True)
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(target, link)
+        res = self.client.call("interceptor_skills", op="unadopt", path="foo")
+        self.assertRefused(res, "unadopt refuses paths outside the skills root")
+        self.assertTrue(os.path.islink(link))
 
     def test_unadopt_inside_root_reaches_cli_sibling_prefix_does_not(self):
         root = self.client.tmp

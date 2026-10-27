@@ -121,38 +121,38 @@ def path_inside_skills_root(candidate: str, roots: list[str]) -> bool:
     return False
 
 
-def unadopt_candidates(name: Optional[str], path: Optional[str], args: list[str]) -> list[str]:
-    out: list[str] = []
+def unadopt_candidates(name: Optional[str], path: Optional[str], args: list[str]) -> list[tuple[str, bool]]:
+    out: list[tuple[str, bool]] = []
     if path:
-        out.append(path)
+        out.append((path, True))
     if name:
-        out.append(name)
+        out.append((name, False))
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--path" and i + 1 < len(args):
-            out.append(args[i + 1])
+            out.append((args[i + 1], True))
             i += 2
             continue
         if a.startswith("--path="):
-            out.append(a[len("--path="):])
+            out.append((a[len("--path="):], True))
             i += 1
             continue
         if a.startswith("-"):
             i += 1
             continue
-        out.append(a)
+        out.append((a, False))
         i += 1
     return out
 
 
-def unadopt_refusal(candidates: list[str], roots: Optional[list[str]] = None) -> Optional[str]:
+def unadopt_refusal(candidates: list[tuple[str, bool]], roots: Optional[list[str]] = None) -> Optional[str]:
     roots = skills_roots() if roots is None else roots
-    for c in candidates:
-        if is_safe_skill_name(c):
+    for value, is_path in candidates:
+        if not is_path and is_safe_skill_name(value):
             continue
-        if not path_inside_skills_root(c, roots):
-            return f"unadopt refuses paths outside the skills root: {c}"
+        if not path_inside_skills_root(value, roots):
+            return f"unadopt refuses paths outside the skills root: {value}"
     return None
 
 
